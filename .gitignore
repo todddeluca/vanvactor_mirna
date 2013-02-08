@@ -1,0 +1,26 @@
+
+
+#########
+# Backups
+*~
+*.old
+*.bak
+\#*#
+
+###################
+# Compiled source #
+*.class
+*.dll
+*.exe
+*.o
+*.so
+*.pyc
+*.pyo
+
+######################
+# OS generated files #
+.DS_Store*
+ehthumbs.db
+Icon?
+Thumbs.db
+
