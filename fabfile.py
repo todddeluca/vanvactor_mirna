@@ -1,9 +1,22 @@
 '''
 # Usage examples:
 
-Initialize local data directory:
+Initialize local deployment environment:
 
     fab local init
+
+Create virtual environment and install packages:
+
+    fab local venv_create venv_install
+
+Deploy code:
+
+    fab local all
+
+Example of running code:
+
+    cd /Users/td23/deploy/vanvactor_mirna/python
+    ../venv/bin/python download_microcosm.py
 
 '''
 
