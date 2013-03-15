@@ -1,2 +1,7 @@
 requests
+temps
+numpy
+matplotlib
+matplotlib-venn
+pandas
 

@@ -2,9 +2,8 @@
 
 import os
 
-import deployenv
+from deployenv import datadir
 
-
-microcosm_data_dir = os.path.join(deployenv.data_dir, 'microcosm')
+microcosm_dir = os.path.join(datadir, 'microcosm')
 
 

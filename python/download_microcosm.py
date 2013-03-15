@@ -37,7 +37,7 @@ def main():
 
     for format in ['txt', 'gff']:
         for mir in ["dme-miR-2b", "dme-miR-13b"]:
-            download(destdir=config.microcosm_data_dir, kind=format, version='v5',
+            download(destdir=config.microcosm_dir, kind=format, version='v5',
                      mir=mir, genome='2188')
 
 
