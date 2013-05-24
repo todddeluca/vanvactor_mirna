@@ -1,6 +1,7 @@
 
 import argparse
 import collections
+import contextlib
 import logging
 import os
 import re
@@ -22,6 +23,24 @@ mus = 'mus_musculus'
 dro = 'drosophila_melanogaster'
 cel = 'caenorhabditis_elegans'
 homo = 'homo_sapiens'
+
+# The seven mirs that were screened in muscle and CNS tissue to examine the
+# differential gene expression effects.
+screened_mirs = ['dme-miR-34', 'dme-miR-92b', 'dme-miR-137', 'dme-miR-190',
+                 'dme-miR-219', 'dme-miR-276a', 'dme-miR-277']
+
+# The twenty-seven mirs that were somehow "functionally validated" by McNeill
+# and Van Vactor.
+validated_mirs = ['dme-miR-8', 'dme-miR-13a', 'dme-miR-14', 'dme-miR-34',
+                  'dme-miR-92a', 'dme-miR-92b', 'dme-miR-190', 'dme-miR-137',
+                  'dme-miR-219', 'dme-miR-276a', 'dme-miR-277', 'dme-miR-279',
+                  'dme-miR-287', 'dme-miR-304', 'dme-miR-308', 'dme-miR-313',
+                  'dme-miR-314', 'dme-miR-316', 'dme-miR-932', 'dme-miR-953',
+                  'dme-miR-969', 'dme-miR-970', 'dme-miR-978', 'dme-miR-979',
+                  'dme-miR-982', 'dme-miR-999', 'dme-miR-1014']
+
+FIVE_PRIME = '5_prime_sequence_homolog'
+SEVENTY_PERCENT = '70_percent_full_sequence_homolog'
 
 
 def example(message):
@@ -76,6 +95,35 @@ def conserved_synapse_genes_db_path():
     # dbpath = ':memory:' # in memory database for testing.
     dbpath = os.path.join(config.datadir, '20130330_dro_mus_homo_cel_mapping.db')
     return dbpath
+
+
+@contextlib.contextmanager
+def conserved_synapse_genes_db_cm():
+    '''
+    Yield an open connnection for use in a with statement.  Commit and close
+    the connection when exiting the with statement.
+    '''
+    path = conserved_synapse_genes_db_path()
+    conn = sqlite3.connect(path)
+    try:
+        yield conn
+    except:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def table_head(table, conn):
+    '''
+    Print the first few rows of table.
+    '''
+    sql = 'select * from {} limit 10'.format(table)
+    print sql
+    for row in conn.execute(sql):
+        print row
 
 
 def write_conserved_gene_and_mir_tables():
@@ -148,6 +196,79 @@ def write_conserved_gene_and_mir_tables():
                         '20130330_{}_synapsedb_genes.tsv'.format(homo))
     write_table(sql, path, ['ensembl_gene_id', 'gene_symbol', 'gene_description'])
 
+
+def write_experimental_mir_targets_genes_lists():
+    # select the genes that are differentially expressed in a tissue when a mir is perturbed.
+    gene_sql = '''select distinct gene_id 
+             from drosophila_melanogaster_experimental_mir_targets 
+             join affy_probeset_to_flybase_gene 
+             on affy_probeset_id = probeset_id 
+             where tissue = ? and mir_id = ? '''
+    # select the probeset ids that are differentially expressed in a tissue when a mir is perturbed.
+    probe_sql = '''select distinct affy_probeset_id
+             from drosophila_melanogaster_experimental_mir_targets 
+             where tissue = ? and mir_id = ? '''
+    
+    with conserved_synapse_genes_db_cm() as conn:
+        for tissue in ['muscle', 'CNS']:
+            for mir in screened_mirs:
+                fn = os.path.join(config.datadir, '20130523_{}_{}_diff_expr_flybase_genes.txt'.format(mir, tissue))
+                probes = [row[0] for row in conn.execute(probe_sql, [tissue, mir])]
+                genes = [row[0] for row in conn.execute(gene_sql, [tissue, mir])]
+                print mir, tissue, len(probes), 'probes ->', len(genes), 'genes'
+                with open(fn, 'w') as fh:
+                    for gene in genes:
+                        fh.write(gene)
+                        fh.write(u'\n')
+
+
+def load_2008_fly_human_mir_homologs_table():
+    '''
+    Create a db table containing the fly mirs homologous to human mirs, based
+    on the paper "Sequence Relationships among C. elegans, D. melanogaster and
+    Human microRNAs Highlight the Extensive Conservation of microRNAs in
+    Biology" by Carolina Ibanez-Ventoso, Mehul Vora, and Monica Driscoll.
+
+    The table contains a column for the drosophila mir id, the homo mir id, and
+    the method used to assert the homologous relationship.  The two methods
+    used in the paper were 5-prime sequence homology and greater than 70% full
+    sequence homology.
+    '''
+    with conserved_synapse_genes_db_cm() as conn:
+        table = '{}_{}_mir_homologs'.format(dro, homo)
+        conn.execute('drop table if exists {}'.format(table))
+        conn.execute('create table {} (dro_mir_id, homo_mir_id, method)'.format(table))
+        params = [(dro_mir, homo_mir, method) for dro_mir, homo_mir, method in
+                  gen_2008_fly_human_homologs()]
+        conn.executemany('insert into {} values(?, ?, ?)'.format(table), params)
+        table_head(table, conn)
+
+
+def load_experimental_mir_targets_table():
+    '''
+    Create a db table containing the mirs, differentially expressed affy
+    probeset ids, and tissue condition of the experiments done by Elizabeth
+    McNeill and Davie Van Vactor.
+    '''
+    with conserved_synapse_genes_db_cm() as conn:
+        table = '{}_experimental_mir_targets'.format(dro)
+        conn.execute('drop table if exists {}'.format(table))
+        conn.execute('create table {} (mir_id, tissue, affy_probeset_id)'.format(table))
+        params = [(mir, tissue, probe) for mir, tissue, probe in 
+                gen_drosophila_experimental_mir_targets()]
+        conn.executemany('insert into {} values(?, ?, ?)'.format(table), params)
+        table_head(table, conn)
+
+
+def load_affy_probeset_to_flybase_gene_table():
+    with conserved_synapse_genes_db_cm() as conn:
+        table = 'affy_probeset_to_flybase_gene'
+        conn.execute('drop table if exists {}'.format(table))
+        conn.execute('create table {} (probeset_id, gene_id)'.format(table))
+        params = [(probe, gene) for probe, gene in
+                  gen_affymetrix_fly_probe_to_flybase_mapping()]
+        conn.executemany('insert into {} values(?, ?)'.format(table), params)
+        table_head(table, conn)
 
 
 def load_conserved_synapse_genes_tables():
@@ -296,6 +417,58 @@ def load_conserved_synapse_genes_tables():
     conn.close()
 
 
+########################
+# FLY-HUMAN MIR HOMOLOGS
+
+
+def gen_2008_fly_human_homologs():
+    '''
+    From PLoS ONE. 2008; 3(7): e2818.
+    Published online 2008 July 30. doi:  10.1371/journal.pone.0002818
+    PMCID: PMC2486268
+    Sequence Relationships among C. elegans, D. melanogaster and Human microRNAs Highlight the Extensive Conservation of microRNAs in Biology
+    Carolina Ibanez-Ventoso, Mehul Vora, and Monica Driscoll
+
+    Generate tuples of drosophila mir id, homo mir id, method) for the ">= 70%
+    full sequence homology" and "5-prime sequence homology" methods for
+    asserting homology between fly and human mirs from the paper.
+    '''
+    fn = os.path.join(config.datadir, '2008_Ibanez-Ventoso_drosophila_melanogaster_homo_sapiens_mir_orthologs.csv')
+    with open(fn) as fh:
+        reader = csv.reader(fh)
+        current_dro_mir = None
+        for i, row in enumerate(reader):
+            # row 0 is a header row
+            if i < 1:
+                continue
+
+            if len(row) != 4:
+                raise Exception('Unexpected row length', i, len(row), row)
+
+            mir_group, dro_mir, five_prime_homo_mir, full_homo_mir = row
+            if dro_mir and dro_mir != current_dro_mir:
+                current_dro_mir = dro_mir
+
+            if not five_prime_homo_mir and not full_homo_mir:
+                raise Exception('No human homolog defined for row!', i, row)
+            if not current_dro_mir:
+                raise Exception('No drosophila homolog defined for row!', i, row)
+            if five_prime_homo_mir:
+                yield current_dro_mir, five_prime_homo_mir, FIVE_PRIME
+            if full_homo_mir:
+                yield current_dro_mir, full_homo_mir, SEVENTY_PERCENT
+
+
+def print_2008_fly_human_homologs():
+    '''
+    See what the generated tuples of human-fly mir homologs look like to make
+    sure they do not look wrong.
+    '''
+    for dro_mir, homo_mir, method in gen_2008_fly_human_homologs():
+        print method, dro_mir, homo_mir
+
+
+
 ###################
 # ROUNDUP FUNCTIONS
 
@@ -384,12 +557,39 @@ def map_ids_to_uniprot(ids, id_type):
     return idmap
 
 
+#################################
+# VAN VACTOR / MCNEILL EXPERIMENT
+
+
+def gen_drosophila_experimental_mir_targets():
+    '''
+    Generate a tuple for every row in the CSV file containing the experimental
+    results for affymetrix probesets that were differentially expressed in
+    drosophila 'muscle' and 'CNS' tissues when 7 miRs were (individually)
+    perturbed.
+    '''
+    fn = os.path.join(config.datadir, '20130523_vanvactor_fly_tissue_7_mir_targets.csv')
+    with open(fn) as fh:
+        reader = csv.reader(fh)
+        for i, row in enumerate(reader):
+            # row 0 is a header row
+            if i < 1:
+                continue
+
+            if len(row) != 3:
+                raise Exception('Unexpected row length', i, len(row), row)
+
+            mir_id, tissue, probeset_id = row
+            yield mir_id, tissue, probeset_id
+
+
+
 ############
 # AFFYMETRIX
 
 
 def download_affymetrix_fly_annotations_file():
-    print '''
+    raise NotImplementedError('''
 Go to page http://www.affymetrix.com/support/technical/byproduct.affx?product=fly-20
 and download:
 
@@ -398,7 +598,8 @@ and download:
     This will download 'Drosophila_2.na33.annot.csv.zip'.
     Unzip this file, then cd to Drosophila_2.na33.annot.csv/.
     Then copy Drosophila_2.na33.annot.csv to the affymetrix/na33/ data dir.
-    '''
+    ''')
+
 
 def affymetrix_fly_annotations_file():
     return os.path.join(config.datadir, 'affymetrix', 'na33', 'Drosophila_2.na33.annot.csv')
@@ -419,9 +620,10 @@ def gen_affymetrix_fly_probe_to_flybase_mapping():
         reader = csv.reader(fh)
         for i, row in enumerate(reader):
             # rows 0 to 18 are comments.
-            # row 19 is headers.
+            # row 19 contains column headers.
             if i < 20:
                 continue
+
             if len(row) != 41:
                 raise Exception('Unexpected row length', i, len(row), row)
 
@@ -832,6 +1034,11 @@ def main():
     subparser.add_argument('mapping_table')
     subparser.add_argument('not_mapped_list')
 
+    subparser = subparsers.add_parser('load_2008_fly_human_mir_homologs_table')
+    subparser = subparsers.add_parser('print_2008_fly_human_homologs')
+    subparser = subparsers.add_parser('write_experimental_mir_targets_genes_lists')
+    subparser = subparsers.add_parser('load_affy_probeset_to_flybase_gene_table')
+    subparser = subparsers.add_parser('load_experimental_mir_targets_table')
     subparser = subparsers.add_parser('load_conserved_synapse_genes_tables', help='')
 
     subparser = subparsers.add_parser('make_flybase_transcript_map', help='')
