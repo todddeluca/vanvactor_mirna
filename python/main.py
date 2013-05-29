@@ -2,6 +2,7 @@
 import argparse
 import collections
 import contextlib
+import itertools
 import logging
 import os
 import re
@@ -28,6 +29,7 @@ homo = 'homo_sapiens'
 # differential gene expression effects.
 screened_mirs = ['dme-miR-34', 'dme-miR-92b', 'dme-miR-137', 'dme-miR-190',
                  'dme-miR-219', 'dme-miR-276a', 'dme-miR-277']
+TISSUES = ['muscle', 'CNS']
 
 # The twenty-seven mirs that were somehow "functionally validated" by McNeill
 # and Van Vactor.
@@ -126,100 +128,21 @@ def table_head(table, conn):
         print row
 
 
-def write_conserved_gene_and_mir_tables():
+########################
+# DATABASE DROP and LOAD
 
+def drop_database():
     path = conserved_synapse_genes_db_path()
-    conn = sqlite3.connect(path)
-
-    def write_table(sql, path, fields):
-        print 'write', sql, 'to', path, 'with fields', fields
-        with open(path, 'w') as fh:
-            fh.write('# The first row is a header row.  All columns are tab-separated.\n')
-            fh.write('\t'.join(fields) + '\n')
-            for row in conn.execute(sql):
-                fh.write('\t'.join(row) + '\n')
-
-    # mir to gene for homo, mus, cel
-    for s, gene_id_type in [
-        (homo, 'ensembl_gene_id'), 
-        (mus, 'ensembl_gene_id'), 
-        (cel, 'wormbase_id'),
-    ]:
-        sql = ' '.join([
-            'select m2t.mir_id, g2u.gene_id',
-            'from {org}_gene_to_uniprot g2u',
-            'join {org}_transcript_to_uniprot t2u',
-            'join {org}_mir_to_trans m2t',
-            'where t2u.uniprot_id = g2u.uniprot_id',
-            'and m2t.trans_id = t2u.trans_id',
-        ]).format(org=s)
-        path = os.path.join(config.datadir, 
-                            '20130330_{}_mir_to_gene.tsv'.format(s))
-        write_table(sql, path, ['microcosm_mir_id', gene_id_type])
-
-    # mir to gene for fly
-    sql = ' '.join([
-        'select m2t.mir_id, g2u.gene_id',
-        'from {org}_gene_to_uniprot g2u',
-        'join {org}_transcript_to_uniprot t2u',
-        'join {org}_annotation_to_transcript a2t',
-        'join {org}_mir_to_trans m2t',
-        'where t2u.uniprot_id = g2u.uniprot_id',
-        'and a2t.trans_id = t2u.trans_id',
-        'and a2t.annotation_id = m2t.trans_id',
-    ]).format(org=dro)
-    path = os.path.join(config.datadir, 
-                        '20130330_{}_mir_to_gene.tsv'.format(dro))
-    write_table(sql, path, ['microcosm_mir_id', 'flybase_gene_id'])
-
-    # gene to gene for human vs (fly or mouse or worm)
-    for s, query_id_type in [
-        (mus, 'ensembl_gene_id'),
-        (dro, 'flybase_gene_id'),
-        (cel, 'wormbase_gene_id'),
-    ]:
-        sql = ' '.join([
-            'select query_g2u.gene_id, subject_g2u.gene_id',
-            'from {org}_to_{homo}_orthologs ologs',
-            'join {org}_gene_to_uniprot query_g2u',
-            'join {homo}_gene_to_uniprot subject_g2u',
-            'where query_g2u.uniprot_id = ologs.query_id',
-            'and subject_g2u.uniprot_id = ologs.subject_id',
-        ]).format(org=s, homo=homo)
-        path = os.path.join(config.datadir, 
-                            '20130330_{}_to_{}_gene_orthologs.tsv'.format(s, homo))
-        write_table(sql, path, [query_id_type, 'ensembl_gene_id'])
-
-    # human synapse genes
-    sql = 'select id, symbol, desc from {homo}_synapse_genes'.format(homo=homo)
-    path = os.path.join(config.datadir, 
-                        '20130330_{}_synapsedb_genes.tsv'.format(homo))
-    write_table(sql, path, ['ensembl_gene_id', 'gene_symbol', 'gene_description'])
+    if os.path.exists(path):
+        os.remove(path)
 
 
-def write_experimental_mir_targets_genes_lists():
-    # select the genes that are differentially expressed in a tissue when a mir is perturbed.
-    gene_sql = '''select distinct gene_id 
-             from drosophila_melanogaster_experimental_mir_targets 
-             join affy_probeset_to_flybase_gene 
-             on affy_probeset_id = probeset_id 
-             where tissue = ? and mir_id = ? '''
-    # select the probeset ids that are differentially expressed in a tissue when a mir is perturbed.
-    probe_sql = '''select distinct affy_probeset_id
-             from drosophila_melanogaster_experimental_mir_targets 
-             where tissue = ? and mir_id = ? '''
-    
-    with conserved_synapse_genes_db_cm() as conn:
-        for tissue in ['muscle', 'CNS']:
-            for mir in screened_mirs:
-                fn = os.path.join(config.datadir, '20130523_{}_{}_diff_expr_flybase_genes.txt'.format(mir, tissue))
-                probes = [row[0] for row in conn.execute(probe_sql, [tissue, mir])]
-                genes = [row[0] for row in conn.execute(gene_sql, [tissue, mir])]
-                print mir, tissue, len(probes), 'probes ->', len(genes), 'genes'
-                with open(fn, 'w') as fh:
-                    for gene in genes:
-                        fh.write(gene)
-                        fh.write(u'\n')
+def load_all_tables():
+    drop_database()
+    load_conserved_synapse_genes_tables()
+    load_2008_fly_human_mir_homologs_table()
+    load_experimental_mir_targets_table()
+    load_affy_probeset_to_flybase_gene_table()
 
 
 def load_2008_fly_human_mir_homologs_table():
@@ -293,8 +216,6 @@ def load_conserved_synapse_genes_tables():
     transcripts.
     '''
     path = conserved_synapse_genes_db_path()
-    if os.path.exists(path):
-        os.remove(path)
     conn = sqlite3.connect(path)
     c = conn.cursor()
 
@@ -415,6 +336,220 @@ def load_conserved_synapse_genes_tables():
 
     conn.commit()
     conn.close()
+
+
+def microcosm_fly_mirs_targeting_conserved_synapse_genes():
+    sql = '''select distinct dm2t.mir_id as fly_mir
+    from homo_sapiens_synapse_genes hsg
+    join homo_sapiens_gene_to_uniprot hg2u
+    join drosophila_melanogaster_to_homo_sapiens_orthologs d2ho
+    join drosophila_melanogaster_transcript_to_uniprot dt2u
+    join drosophila_melanogaster_annotation_to_transcript da2t
+    join drosophila_melanogaster_mir_to_trans dm2t
+    where hsg.id = hg2u.gene_id
+    and hg2u.uniprot_id = d2ho.subject_id
+    and d2ho.query_id = dt2u.uniprot_id
+    and dt2u.trans_id = da2t.trans_id
+    and da2t.annotation_id = dm2t.trans_id
+    '''
+    with conserved_synapse_genes_db_cm() as conn:
+        return [row[0] for row in conn.execute(sql)]
+
+
+####################
+# WRITE OUTPUT FILES
+
+def write_conserved_gene_and_mir_tables():
+
+    path = conserved_synapse_genes_db_path()
+    conn = sqlite3.connect(path)
+
+    def write_table(sql, path, fields):
+        print 'write', sql, 'to', path, 'with fields', fields
+        with open(path, 'w') as fh:
+            fh.write('# The first row is a header row.  All columns are tab-separated.\n')
+            fh.write('\t'.join(fields) + '\n')
+            for row in conn.execute(sql):
+                fh.write('\t'.join(row) + '\n')
+
+    # mir to gene for homo, mus, cel
+    for s, gene_id_type in [
+        (homo, 'ensembl_gene_id'), 
+        (mus, 'ensembl_gene_id'), 
+        (cel, 'wormbase_id'),
+    ]:
+        sql = ' '.join([
+            'select m2t.mir_id, g2u.gene_id',
+            'from {org}_gene_to_uniprot g2u',
+            'join {org}_transcript_to_uniprot t2u',
+            'join {org}_mir_to_trans m2t',
+            'where t2u.uniprot_id = g2u.uniprot_id',
+            'and m2t.trans_id = t2u.trans_id',
+        ]).format(org=s)
+        path = os.path.join(config.datadir, 
+                            '20130330_{}_mir_to_gene.tsv'.format(s))
+        write_table(sql, path, ['microcosm_mir_id', gene_id_type])
+
+    # mir to gene for fly
+    sql = ' '.join([
+        'select m2t.mir_id, g2u.gene_id',
+        'from {org}_gene_to_uniprot g2u',
+        'join {org}_transcript_to_uniprot t2u',
+        'join {org}_annotation_to_transcript a2t',
+        'join {org}_mir_to_trans m2t',
+        'where t2u.uniprot_id = g2u.uniprot_id',
+        'and a2t.trans_id = t2u.trans_id',
+        'and a2t.annotation_id = m2t.trans_id',
+    ]).format(org=dro)
+    path = os.path.join(config.datadir, 
+                        '20130330_{}_mir_to_gene.tsv'.format(dro))
+    write_table(sql, path, ['microcosm_mir_id', 'flybase_gene_id'])
+
+    # gene to gene for human vs (fly or mouse or worm)
+    for s, query_id_type in [
+        (mus, 'ensembl_gene_id'),
+        (dro, 'flybase_gene_id'),
+        (cel, 'wormbase_gene_id'),
+    ]:
+        sql = ' '.join([
+            'select query_g2u.gene_id, subject_g2u.gene_id',
+            'from {org}_to_{homo}_orthologs ologs',
+            'join {org}_gene_to_uniprot query_g2u',
+            'join {homo}_gene_to_uniprot subject_g2u',
+            'where query_g2u.uniprot_id = ologs.query_id',
+            'and subject_g2u.uniprot_id = ologs.subject_id',
+        ]).format(org=s, homo=homo)
+        path = os.path.join(config.datadir, 
+                            '20130330_{}_to_{}_gene_orthologs.tsv'.format(s, homo))
+        write_table(sql, path, [query_id_type, 'ensembl_gene_id'])
+
+    # human synapse genes
+    sql = 'select id, symbol, desc from {homo}_synapse_genes'.format(homo=homo)
+    path = os.path.join(config.datadir, 
+                        '20130330_{}_synapsedb_genes.tsv'.format(homo))
+    write_table(sql, path, ['ensembl_gene_id', 'gene_symbol', 'gene_description'])
+
+
+def write_experimental_mir_targets_genes_lists():
+    # select the genes that are differentially expressed in a tissue when a mir is perturbed.
+    gene_sql = '''select distinct gene_id 
+             from drosophila_melanogaster_experimental_mir_targets 
+             join affy_probeset_to_flybase_gene 
+             on affy_probeset_id = probeset_id 
+             where tissue = ? and mir_id = ? '''
+    # select the probeset ids that are differentially expressed in a tissue when a mir is perturbed.
+    probe_sql = '''select distinct affy_probeset_id
+             from drosophila_melanogaster_experimental_mir_targets 
+             where tissue = ? and mir_id = ? '''
+    
+    with conserved_synapse_genes_db_cm() as conn:
+        for tissue in TISSUES:
+            for mir in screened_mirs:
+                fn = os.path.join(config.datadir, '20130523_{}_{}_diff_expr_flybase_genes.txt'.format(mir, tissue))
+                probes = [row[0] for row in conn.execute(probe_sql, [tissue, mir])]
+                genes = [row[0] for row in conn.execute(gene_sql, [tissue, mir])]
+                print mir, tissue, len(probes), 'probes ->', len(genes), 'genes'
+                with open(fn, 'w') as fh:
+                    for gene in genes:
+                        fh.write(gene)
+                        fh.write(u'\n')
+
+
+def write_human_mirs_targeting_conserved_synapse_genes():
+    '''
+    Write a list of human mirs that are predicted to target genes that are
+    synaptic genes (according the synapsedb) and orthologous to fly genes.
+    '''
+    sql = '''select distinct hm2t.mir_id as human_mir
+    from homo_sapiens_synapse_genes hsg
+    join homo_sapiens_gene_to_uniprot hg2u
+    join drosophila_melanogaster_to_homo_sapiens_orthologs d2ho
+    join homo_sapiens_transcript_to_uniprot as ht2u
+    join homo_sapiens_mir_to_trans hm2t
+    where hsg.id = hg2u.gene_id
+    and hg2u.uniprot_id = d2ho.subject_id
+    and ht2u.uniprot_id = hg2u.uniprot_id
+    and hm2t.trans_id = ht2u.trans_id
+    '''
+    fn = os.path.join(config.datadir, 'predicted_microcosm_human_mirs_targeting_conserved_synapse_genes.txt')
+    with conserved_synapse_genes_db_cm() as conn, open(fn, 'w') as fh:
+        mirs = set([row[0] for row in conn.execute(sql)])
+        fh.write(''.join([mir + '\n' for mir in mirs]))
+
+
+def write_fly_mirs_targeting_conserved_synapse_genes():
+    '''
+    Write a list of fly mirs that are predicted to target genes that are
+    orthologous to human synaptic genes (according the synapsedb).
+    '''
+    fn = os.path.join(config.datadir, 'predicted_microcosm_fly_mirs_targeting_conserved_synapse_genes.txt')
+    mirs = sorted(microcosm_fly_mirs_targeting_conserved_synapse_genes())
+    with open(fn, 'w') as fh:
+        fh.write(''.join([mir + '\n' for mir in mirs]))
+
+
+def write_overlap_between_validated_fly_mirs_and_predicted_fly_mirs():
+    fn = os.path.join(config.datadir, 'overlap_between_validated_and_predicted_microcosm_fly_mirs.csv')
+    predicted = set(microcosm_fly_mirs_targeting_conserved_synapse_genes())
+    validated = set(validated_mirs)
+    write_set_overlap_file(validated, predicted, 'validated', 'predicted', fn)
+
+
+def write_overlap_between_screened_and_predicted_fly_mir_targets():
+
+    predicted_sql = '''select distinct dg2u.gene_id as fly_gene_id
+    from drosophila_melanogaster_gene_to_uniprot dg2u 
+    join drosophila_melanogaster_transcript_to_uniprot dt2u
+    join drosophila_melanogaster_annotation_to_transcript da2t
+    join drosophila_melanogaster_mir_to_trans dm2t
+    where 1
+    and dg2u.uniprot_id = dt2u.uniprot_id
+    and dt2u.trans_id = da2t.trans_id
+    and da2t.annotation_id = dm2t.trans_id
+    and dm2t.mir_id = ?
+    '''
+
+    screened_sql = '''select distinct ap2g.gene_id as fly_gene_id
+    from drosophila_melanogaster_experimental_mir_targets as demt
+    join affy_probeset_to_flybase_gene ap2g
+    where demt.affy_probeset_id = ap2g.probeset_id
+    and demt.mir_id = ?
+    and demt.tissue = ?
+    '''
+
+    for mir in screened_mirs:
+        for tissue in TISSUES:
+            fn = os.path.join(config.datadir, '{}_{}_overlap_between_screened_and_microcosm_predicted_targets.csv'.format(tissue, mir))
+            with conserved_synapse_genes_db_cm() as conn:
+                print mir, tissue
+                predicted = set([row[0] for row in conn.execute(predicted_sql, [mir])])
+                screened = set([row[0] for row in conn.execute(screened_sql, [mir, tissue])])
+                write_set_overlap_file(screened, predicted, 'screened', 'predicted', fn)
+
+
+def write_set_overlap_file(set1, set2, name1, name2, filename):
+    '''
+    Given two sets, write out a csv file containing the set differences and 
+    set intersection, placed in 3 columns, in order to be excel friendly.
+    The first row is column headers based on name1 and name2.  The columns 
+    are <name1>_not_<name2>, <name1>_and_<name2>, <name2>_not_<name1>.
+
+    set1: a set.  Should have csv friendly values, since no quoting of any kind
+    is done.
+    set2: a set.
+    name1: A name for set 1 used to build the column headers.  keep it simple.
+    Avoid commas and special characters.
+    name2: Like name 1, but for set 2.
+    filename: where to write the csv file.
+    '''
+    one_not_two = sorted(set1 - set2)
+    two_not_one = sorted(set2 - set1)
+    one_and_two = sorted(set1 & set2)
+    with open(filename, 'w') as fh:
+        fh.write('{one}_not_{two},{one}_and_{two},{two}_not_{one}\n'.format(
+            one=name1, two=name2))
+        for row in itertools.izip_longest(one_not_two, one_and_two, two_not_one, fillvalue=''):
+            fh.write(','.join([str(i) for i in row]) + '\n')
 
 
 ########################
@@ -718,7 +853,10 @@ def gen_microcosm_targets(species, version='v5'):
             assert len(fields) == 13
             mir = fields[1]
             transcript_id = fields[11]
-            yield {'mir': mir, 'transcript_id': transcript_id}
+            # For some reason, the human microcosm data has non-human mirs in
+            # it.  Do not yield non-human mirs for Homo sapiens.
+            if species != homo or mir.startswith('hsa-'):
+                yield {'mir': mir, 'transcript_id': transcript_id}
 
 
 
@@ -1034,6 +1172,10 @@ def main():
     subparser.add_argument('mapping_table')
     subparser.add_argument('not_mapped_list')
 
+    subparser = subparsers.add_parser('write_fly_mirs_targeting_conserved_synapse_genes')
+    subparser = subparsers.add_parser('write_human_mirs_targeting_conserved_synapse_genes')
+    subparser = subparsers.add_parser('write_overlap_between_screened_and_predicted_fly_mir_targets')
+    subparser = subparsers.add_parser('write_overlap_between_validated_fly_mirs_and_predicted_fly_mirs')
     subparser = subparsers.add_parser('load_2008_fly_human_mir_homologs_table')
     subparser = subparsers.add_parser('print_2008_fly_human_homologs')
     subparser = subparsers.add_parser('write_experimental_mir_targets_genes_lists')
