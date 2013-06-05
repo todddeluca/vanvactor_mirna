@@ -2,6 +2,7 @@
 import argparse
 import collections
 import contextlib
+import csv
 import itertools
 import logging
 import os
@@ -9,21 +10,100 @@ import re
 import sqlite3
 import subprocess
 import sys
+import urllib
 import xml.etree.cElementTree as elementtree
-import csv
 
 import pandas
 import numpy as np
+import rdflib
+from rdflib import URIRef, BNode, Literal
 
 import config
 import temps
+_iri = rdflib.URIRef('')
 
+# RDF URIs and URI generators
+dro_iri = rdflib.URIRef('http://purl.uniprot.org/taxonomy/7227')
+homo_iri = rdflib.URIRef('http://purl.uniprot.org/taxonomy/9606')
+synaptic_iri = rdflib.URIRef('http://purl.synaptomedb.org/owl/synaptic')
+
+orthologous_to_pred = rdflib.URIRef('http://purl.obolibrary.org/obo/so_orthologous_to')
+organism_pred = rdflib.URIRef('http://purl.uniprot.org/core/organism')
+see_also_pred = rdflib.URIRef('http://www.w3.org/2000/01/rdf-schema#seeAlso')
+classified_pred = rdflib.URIRef('http://purl.uniprot.org/core/classifiedWith')
+targets_pred = rdflib.URIRef('http://purl.mirbase.org/owl/targets')
+type_pred = rdflib.URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#type')
+db_pred = rdflib.URIRef('http://purl.uniprot.org/core/database')
+current_id_pred = rdflib.URIRef('http://purl.mirbase.org/owl/current_id')
+has_id_pred = rdflib.URIRef('http://purl.mirbase.org/owl/has_id')
+
+taxon_class = rdflib.URIRef('http://purl.uniprot.org/core/Taxon')
+protein_class = rdflib.URIRef('http://purl.uniprot.org/core/Protein')
+
+targetscan_mir_family_db = rdflib.URIRef('http://purl.targetscan.org/database/mir_family')
+refseq_db = rdflib.URIRef('http://purl.ncbi.nlm.nih.gov/database/refseq')
+flybase_annotation_db = rdflib.URIRef('http://purl.flybase.org/database/annotation')
+flybase_gene_db = rdflib.URIRef('http://purl.flybase.org/database/gene')
+flybase_transcript_db = rdflib.URIRef('http://purl.flybase.org/database/transcript')
+mirbase_acc_db = rdflib.URIRef('http://purl.mirbase.org/database/mirna_acc')
+mirbase_id_db = rdflib.URIRef('http://purl.mirbase.org/database/mirna_id')
+ensembl_gene_db = rdflib.URIRef('http://purl.ensembl.org/database/gene')
+ensembl_transcript_db = rdflib.URIRef('http://purl.ensembl.org/database/transcript')
+
+def targetscan_mir_family_iri(family):
+    return rdflib.URIRef('http://purl.targetscan.org/mir_family/{}'.format(urllib.quote(family, safe='')))
+
+def refseq_iri(refseq):
+    return rdflib.URIRef('http://purl.ncbi.nlm.nih.gov/refseq/{}'.format(refseq ))
+
+def flybase_annotation_iri(annotation):
+    return rdflib.URIRef('http://purl.flybase.org/annotation_id/{}'.format(annotation))
+
+def flybase_gene_iri(gene):
+    return rdflib.URIRef('http://purl.flybase.org/gene_id/{}'.format(gene))
+
+def flybase_transcript_iri(transcript):
+    return rdflib.URIRef('http://purl.flybase.org/transcript_id/{}'.format(transcript))
+
+def mirbase_acc_iri(acc):
+    return rdflib.URIRef('http://purl.mirbase.org/mirna_acc/{}'.format(acc))
+
+def mirbase_id_iri(mirna_id):
+    return rdflib.URIRef('http://purl.mirbase.org/mirna_id/{}'.format(mirna_id))
+
+def ensembl_gene_iri(gene):
+    return rdflib.URIRef('http://purl.ensembl.org/gene/{}'.format(gene))
+
+def ensembl_transcript_iri(transcript):
+    return rdflib.URIRef('http://purl.ensembl.org/transcript/{}'.format(transcript))
+
+def uniprot_iri(acc):
+    return rdflib.URIRef('http://purl.uniprot.org/uniprot/{}'.format(acc))
+
+# Structure of a Dmel Transcript Annotation ID
+# http://flybase.org/static_pages/docs/nomenclature/nomenclature3.html#2.4.
+# Annotation IDs are represented in a common way: a species-specific 2
+# letter prefix followed by a four or five digit integer. For historical
+# reasons, there are two 2-letter prefixes for D. melanogaster: CG for
+# protein-coding genes and CR for non-protein-coding-genes.
+# And from personal communication with Josh Goodman, "The '-RX' and '-PX'
+# suffixes (X being one or more letters) are given to transcripts and
+# polypeptides respectively."
+#
+# Notes: CG50-RF is an real annotation id that violates this pattern.
+flybase_annotation_id_regex = re.compile(r'^(C(G|R)\d+-R[A-Z]+)$')
 
 # species names used for db tables and microcosm files
 mus = 'mus_musculus'
 dro = 'drosophila_melanogaster'
 cel = 'caenorhabditis_elegans'
 homo = 'homo_sapiens'
+
+# ncbi taxon ids for species
+mus_taxon = '10090'
+dro_taxon = '7227'
+cel_taxon = '6239'
+homo_taxon = '9606'
 
 # The seven mirs that were screened in muscle and CNS tissue to examine the
 # differential gene expression effects.
@@ -45,6 +125,13 @@ FIVE_PRIME = '5_prime_sequence_homolog'
 SEVENTY_PERCENT = '70_percent_full_sequence_homolog'
 
 
+# taxons and pairs used for roundup orthologs
+taxmap = {dro: '7227', homo: '9606', mus: '10090', cel: '6239'}
+TAXON_TO_NAME = {cel_taxon: cel, dro_taxon: dro, homo_taxon: homo, mus_taxon: mus}
+# Orthologs between human and the other 3 species.
+ROUNDUP_PAIRS = [(dro_taxon, homo_taxon), (mus_taxon, homo_taxon), (cel_taxon, homo_taxon)]
+
+
 def example(message):
 
     print 'Example CLI function.'
@@ -53,7 +140,7 @@ def example(message):
 
 def call(cmd):
     '''
-    Run a shell command using check_call.  Also print the command before
+    Run a shell command string using check_call.  Also print the command before
     running it.
     '''
     print cmd
@@ -79,6 +166,19 @@ def download(url, dest, mode=0775):
     makedirs(os.path.dirname(dest), mode)
     call('curl -o {} {}'.format(dest, url))
     return dest
+
+
+def download_and_unzip(url, dest_dir):
+    '''
+    download a url to a file in dest_dir named with the basename of the url.
+    If the file is named *.zip, unzip the file in the directory.  Finally,
+    return the filename with any '.zip' suffix returned.
+    '''
+    dest = os.path.join(dest_dir, os.path.basename(url))
+    download(url, dest)
+    if dest.endswith('.zip'):
+        call('unzip -d {} {}'.format(dest_dir, dest))
+    return dest.rstrip('.zip')
 
 
 def human_synaptic_mir_targets():
@@ -144,6 +244,17 @@ def load_all_tables():
     load_experimental_mir_targets_table()
     load_affy_probeset_to_flybase_gene_table()
 
+
+def load_targetscan_etc():
+
+    # load uniprot to ncbi gene id
+    # load fly mir family to gene symbol
+    # load fly gene symbol to flybase gene id
+    # load fly mir family to mirbase id and mirbase acc
+
+    # load human mir family to ncbi gene id
+    # load human mir family to mirbase id and mirbase acc
+    return
 
 def load_2008_fly_human_mir_homologs_table():
     '''
@@ -621,8 +732,195 @@ def gen_orthologs(query_taxon, subject_taxon, divergence='0.8', evalue='1e-5',
                 yield qid, sid, distance
 
 
+def roundup_rdf_path(divergence='0.8', evalue='1e-5', version='4'):
+    d = os.path.join(config.datadir, 'roundup', 'v' + version)
+    return os.path.join(d, 'roundup-{}-orthologs_{}_{}.nt'.format(
+        version, divergence, evalue))
+
+
+def write_roundup_orthologs_rdf():
+    '''
+    For the input file for the given query taxon, subject taxon, divergence,
+    evalue, and roundup version, write out a triple for each query id, subject
+    id pair and then two triples to say that the query id is from the
+    query_taxon organism and the subject id is from the subject taxon too.
+
+    Note the loss of divergence, evalue, roundup version, and ortholog distance
+    score.
+    '''
+    # parameters
+    version = '4'
+    divergence = '0.8'
+    evalue = '1e-5'
+
+    done_ids = set()
+    graph = rdflib.Graph()
+    for qid, sid, distance in gen_orthologs(dro_taxon, homo_taxon,
+                                            divergence, evalue, version):
+        q = uniprot_iri(qid)
+        s = uniprot_iri(sid)
+        graph.add((q, orthologous_to_pred, s)) # link query to subject
+        if qid not in done_ids:
+            graph.add((q, organism_pred, dro_iri)) # link query to taxon
+            done_ids.add(qid)
+        if sid not in done_ids:
+            graph.add((s, organism_pred, homo_iri)) # link subject to taxon
+            done_ids.add(sid)
+
+    # n-triples file extension
+    with open(roundup_rdf_path(), 'w') as outfh:
+        outfh.write(graph.serialize(format='nt'))
+
+
+#########
+# MIRBASE
+
+
+def mirbase_aliases_url():
+    return 'ftp://mirbase.org/pub/mirbase/19/aliases.txt.gz'
+
+
+def mirbase_aliases_dest():
+    return os.path.join(config.datadir, 'mirbase', '19',
+                        os.path.basename(mirbase_aliases_url()))
+
+
+def mirbase_aliases_filename():
+    return mirbase_aliases_dest().rstrip('.gz')
+
+
+def mirbase_rdf_filename():
+    return os.path.join(config.datadir, 'mirbase', '19', 'mirbase.nt')
+
+
+def download_mirbase_aliases():
+
+    url = mirbase_aliases_url()
+    dest = mirbase_aliases_dest()
+    download(url, dest)
+    call('gunzip {}'.format(dest))
+
+
+def write_mirbase_rdf():
+    graph = rdflib.Graph()
+    human_accs = set()
+    human_ids = set()
+    fly_accs = set()
+    fly_ids = set()
+
+    # link mirbase accessions to mirbase ids and collect the accession and ids
+    with open(mirbase_aliases_filename()) as fh:
+        for line in fh:
+            # Example lines:
+            # MI0000001       cel-let-7L;cel-let-7;
+            # MI0000003       cel-mir-1;
+            mirbase_acc, mirbase_ids_str = line.strip().split('\t')
+            mirbase_ids = mirbase_ids_str.rstrip(';').split(';')
+            acc = mirbase_acc_iri(mirbase_acc)
+            current_mirbase_id = mirbase_ids[-1]
+            # link the mirbase acc to all ids
+            for mirbase_id in mirbase_ids:
+                mid = mirbase_id_iri(mirbase_id)
+                # for now only do human and fly data
+                if mirbase_id.startswith('dme') or mirbase_id.startswith('hsa'):
+                    # link the mirbase acc to the mirbase id
+                    graph.add((acc, has_id_pred, mid))
+                    if mirbase_id == current_mirbase_id:
+                        # link the mirbase acc to current mirbase id
+                        graph.add((acc, current_id_pred, mid))
+
+                    if mirbase_id.startswith('dme'):
+                        fly_accs.add(acc)
+                        fly_ids.add(mid)
+                    elif mirbase_id.startswith('hsa'):
+                        human_accs.add(acc)
+                        human_ids.add(mid)
+
+    # annotate accessions and ids with their database and organism
+    for acc in human_accs:
+        graph.add((acc, organism_pred, homo_iri))
+        graph.add((acc, db_pred, mirbase_acc_db))
+
+    for mid in human_ids:
+        graph.add((mid, organism_pred, homo_iri))
+        graph.add((mid, db_pred, mirbase_id_db))
+
+    for acc in fly_accs:
+        graph.add((acc, organism_pred, dro_iri))
+        graph.add((acc, db_pred, mirbase_acc_db))
+
+    for mid in fly_ids:
+        graph.add((mid, organism_pred, dro_iri))
+        graph.add((mid, db_pred, mirbase_id_db))
+
+    with open(mirbase_rdf_filename(), 'w') as outfh:
+        outfh.write(graph.serialize(format='nt'))
+
+
 ###################
 # UNIPROT FUNCTIONS
+
+def write_uniprot_rdf():
+    '''
+    '''
+    # id dbs, id kind, uniprot id mapping file
+    # mrna refseq ids (targetscan) (human) YES, idmapping.RefSeq_NT.dat (but need to strip version off the end)
+    # flybase annotation ids (microcosm, flybase) (fly) YES/MAYBE, idmapping.UCSC.dat
+    # flybase gene ids (targetscan) (fly) YES, idmapping.FlyBase.dat 
+    # flybase transcript ids (flybase) (fly), YES, idmapping.EnsemblGenome_TRS.dat
+    # ensembl transcript ids (microcosm) (human), YES, idmapping.Ensembl_TRS.dat
+    # ensembl gene ids (synaptomedb) (human), YES, idmapping.Ensembl.dat
+    xref_data = [
+        (refseq_iri, 'RefSeq_NT', re.compile(r'^(NM_\d+)\.\d+$'), homo_iri, refseq_db),
+        (flybase_annotation_iri, 'UCSC', flybase_annotation_id_regex, dro_iri, flybase_annotation_db),
+        (flybase_gene_iri, 'FlyBase', re.compile(r'(FBgn\d+)$'), dro_iri, flybase_gene_db),
+        (flybase_transcript_iri, 'EnsemblGenome_TRS', re.compile(r'(FBtr\d+)$'), dro_iri, flybase_transcript_db),
+        (ensembl_transcript_iri, 'Ensembl_TRS', re.compile(r'(ENST\d+)$'), homo_iri, ensembl_transcript_db),
+        (ensembl_gene_iri, 'Ensembl', re.compile(r'(ENSG\d+)$'), homo_iri, ensembl_gene_db),
+    ]
+
+    graph = rdflib.Graph()
+    human_uniprots = set()
+    fly_uniprots = set()
+    uniprots_map = {homo_iri: human_uniprots, dro_iri: fly_uniprots}
+
+    # id_iri makes an IRI/URI for the id.
+    # id_type specifies what file has the uniprot to id mapping.
+    # id_regex matches the specific ids in the file that we want, since some
+    # files have data for many kinds of ids or species.  Also used to select
+    # only part of an id.
+    # id_taxon is the IRI for the taxon of the ids we want from the file.
+    # id_database is the IRI for the database of origin of the ids (e.g
+    # flybase genes use 'http://purl.flybase.org/database/gene').
+    for id_iri, id_type, id_regex, id_taxon, id_database in xref_data:
+        print 'Doing {} for {} in {}'.format(id_type, id_taxon, id_database)
+        for uniprot, id_kind, mapped_id in gen_uniprot_id_mappings(id_type=id_type):
+            m = id_regex.search(mapped_id)
+            if not m:
+                # skip ids not matching the specific type and species we want
+                continue
+            else:
+                # for refseq ids, we trim off the version suffix.
+                trimmed_id = m.group(1)
+
+            uni = uniprot_iri(uniprot)
+            mapped = id_iri(trimmed_id)
+            graph.add((uni, see_also_pred, mapped))
+            graph.add((mapped, db_pred, id_database))
+            graph.add((mapped, organism_pred, id_taxon))
+            uniprots_map[id_taxon].add(uni)
+
+    for taxon, uniprots in uniprots_map.items():
+        for uni in uniprots:
+            graph.add((uni, organism_pred, taxon))
+
+    with open(uniprot_rdf_path(), 'w') as outfh:
+        outfh.write(graph.serialize(format='nt'))
+
+
+def uniprot_rdf_path(version='2013_04'):
+    return os.path.join(config.datadir, 'uniprot', version,
+                        'uniprot-{}-idmapping.nt'.format(version))
 
 
 def uniprot_idmapping_path(version='2013_04', id_type=None):
@@ -654,6 +952,13 @@ def split_uniprot_idmapping_file():
 def gen_uniprot_id_mappings(id_type=None):
     '''
     Return tuples of "UniProtKB-AC", "ID type", and "ID"
+    Examples:
+        P31946  Ensembl ENSG00000166913
+        P36872  EnsemblGenome_TRS       FBtr0082186
+        P61981  Ensembl_TRS     ENST00000307630
+        P20905  FlyBase FBgn0004573
+        Q9V785  UCSC    CG7761-RA
+        Q2NKQ1  RefSeq_NT       NM_133454.2
     '''
     path = uniprot_idmapping_path(id_type=id_type)
     with open(path) as fh:
@@ -798,6 +1103,61 @@ def map_affymetrix_fly_probe_ids_to_flybase_genes():
 ###########
 # MICROCOSM
 
+def microcosm_rdf_path():
+    return os.path.join(config.datadir, 'microcosm', 'v5', 'microcosm-v5.nt')
+
+
+def write_microcosm_rdf():
+    graph = rdflib.Graph()
+    fly_mirs = set()
+    fly_anno_ids = set()
+    human_mirs = set()
+    human_ensembl_ids = set()
+
+    # link mir to transcript and collect mirs and transcripts (since each mir
+    # or transcript can appear multiple times)
+    print 'processing human mir target predictions'
+    for mirbase_id, ensembl_transcript in gen_microcosm_human_predicted_targets():
+        mir = mirbase_id_iri(mirbase_id)
+        ens = ensembl_transcript_iri(ensembl_transcript)
+        graph.add((mir, targets_pred, ens))
+        human_mirs.add(mir)
+        human_ensembl_ids.add(ens)
+
+    # link each mir to its db and organism
+    print 'annotating human mirs'
+    for mir in human_mirs:
+        graph.add((mir, db_pred, mirbase_id_db))
+        graph.add((mir, organism_pred, homo_iri))
+
+    # link each transcript to its db and organism
+    print 'annotationg human targets'
+    for ens in human_ensembl_ids:
+        graph.add((ens, db_pred, ensembl_transcript_db))
+        graph.add((ens, organism_pred, homo_iri))
+
+    print 'processing fly mir target predictions'
+    for mirbase_id, flybase_annotation_id in gen_microcosm_fly_predicted_targets():
+        mir = mirbase_id_iri(mirbase_id)
+        anno = flybase_annotation_iri(flybase_annotation_id)
+        graph.add((mir, targets_pred, anno))
+        fly_mirs.add(mir)
+        fly_anno_ids.add(anno)
+
+    print 'annotating fly mirs'
+    for mir in fly_mirs:
+        graph.add((mir, db_pred, mirbase_id_db))
+        graph.add((mir, organism_pred, dro_iri))
+
+    print 'annotationg fly targets'
+    for anno in fly_anno_ids:
+        graph.add((anno, db_pred, flybase_annotation_db))
+        graph.add((anno, organism_pred, dro_iri))
+
+    with open(microcosm_rdf_path(), 'w') as outfh:
+        outfh.write(graph.serialize(format='nt'))
+
+
 def download_microcosm_targets(species, version='v5'):
     '''
     species: e.g. mus_musculus
@@ -837,10 +1197,26 @@ def microcosm_species_targets_file(species, version='v5'):
                             version=version, species=species))
 
 
+def gen_microcosm_fly_predicted_targets():
+    for target in gen_microcosm_targets(dro):
+        mirbase_id = target['mir']
+        flybase_transcript_annotation_id = target['transcript_id']
+        yield mirbase_id, flybase_transcript_annotation_id
+
+
+def gen_microcosm_human_predicted_targets():
+    for target in gen_microcosm_targets(homo):
+        mirbase_id = target['mir']
+        ensembl_transcript_id = target['transcript_id']
+        yield mirbase_id, ensembl_transcript_id
+
+
 def gen_microcosm_targets(species, version='v5'):
     '''
     Yield every row of the microcosm targets table as a dict containing 'mir'
     and 'transcript_id'.
+
+    species: a microcosm species name, e.g. 'homo_sapiens' or 'drosophila_melanogaster'
     '''
     path = microcosm_species_targets_file(species, version)
     with open(path) as fh:
@@ -854,10 +1230,257 @@ def gen_microcosm_targets(species, version='v5'):
             mir = fields[1]
             transcript_id = fields[11]
             # For some reason, the human microcosm data has non-human mirs in
-            # it.  Do not yield non-human mirs for Homo sapiens.
-            if species != homo or mir.startswith('hsa-'):
+            # it.
+            # Do not yield non-human mirs for Homo sapiens (or non dme mirs for
+            # Drosophila melanogaster).
+            if ((species == homo and mir.startswith('hsa-')) 
+                or (species == dro and mir.startswith('dme-'))
+                or (species != homo and species != dro)):
                 yield {'mir': mir, 'transcript_id': transcript_id}
 
+
+#########
+# MinoTar
+
+
+def download_minotar():
+
+    # version is made up b/c I can not find a version on the minotar site.
+    minotar_dir = os.path.join(config.datadir, 'minotar', 'v1')
+    human_dir = os.path.join(minotar_dir, 'homo_sapiens')
+    fly_dir = os.path.join(minotar_dir, 'drosophila_melanogaster')
+
+    url = 'http://www.flyrnai.org/supplement/HumanUniqueMirnas.txt'
+    download_and_unzip(url, human_dir)
+    url = 'http://www.flyrnai.org/supplement/HumanConservedSeedsConservedTargs.zip'
+    download_and_unzip(url, human_dir)
+    url = 'http://www.flyrnai.org/supplement/DrosUniqueMirnas.txt'
+    download_and_unzip(url, fly_dir)
+    url = 'http://www.flyrnai.org/supplement/DrosConservedSeedsConservedTargs.zip'
+    download_and_unzip(url, fly_dir)
+
+
+############
+# TARGETSCAN
+
+
+def targetscan_dir(version='6.2'):
+    return os.path.join(config.datadir, 'targetscan', '6.2')
+
+
+def targetscan_rdf_path(version='6.2'):
+    return os.path.join(targetscan_dir(version),
+                        'targetscan-{}.nt'.format(version))
+
+
+def targetscan_fly_symbol_to_gene():
+    symbol_to_gene = {}
+    for gene_id, symbol in gen_targetscan_fly_gene_to_symbol():
+        if symbol in symbol_to_gene:
+            raise Exception('Symbol can map to only one gene', symbol, gene_id)
+        else:
+            symbol_to_gene[symbol] = gene_id
+
+    return symbol_to_gene
+
+
+def write_targetscan_rdf():
+    graph = rdflib.Graph()
+    families = set()
+    fly_mirbase_accs = set()
+    fly_genes = set()
+    human_mirbase_accs = set()
+    human_refseqs = set()
+
+    # link family to fly gene target
+    # converting fly symbol to flybase gene id
+    symbol_to_gene = targetscan_fly_symbol_to_gene()
+    for family, symbol in gen_targetscan_fly_predicted_targets():
+        fam = targetscan_mir_family_iri(family)
+        gene = flybase_gene_iri(symbol_to_gene[symbol])
+        graph.add((fam, targets_pred, gene))
+        families.add(fam)
+        fly_genes.add(gene)
+
+    # link mir_family to fly mirbase_acc
+    for family, mirbase_id, mirbase_acc in gen_targetscan_fly_mir_family_info():
+        fam = targetscan_mir_family_iri(family)
+        acc = mirbase_acc_iri(mirbase_acc)
+        graph.add((fam, see_also_pred, acc))
+        families.add(fam)
+        fly_mirbase_accs.add(acc)
+
+    # link family to human refseq transcript
+    for family, refseq_transcript in gen_targetscan_human_predicted_targets():
+        fam = targetscan_mir_family_iri(family)
+        ref = refseq_iri(refseq_transcript)
+        graph.add((fam, targets_pred, ref))
+        families.add(fam)
+        human_refseqs.add(ref)
+
+    # link mir_family to human mirbase_acc
+    for family, mirbase_id, mirbase_acc in gen_targetscan_human_mir_family_info():
+        fam = targetscan_mir_family_iri(family)
+        acc = mirbase_acc_iri(mirbase_acc)
+        graph.add((fam, see_also_pred, acc))
+        families.add(fam)
+        human_mirbase_accs.add(acc)
+
+    # indicate that families are from the targetscan db
+    for fam in families:
+        graph.add((fam, db_pred, targetscan_mir_family_db))
+
+    # fly genes are from the flybase database and drosophila organism
+    for gene in fly_genes:
+        graph.add((gene, db_pred, flybase_gene_db))
+        graph.add((gene, organism_pred, dro_iri))
+
+    # human refseqs are from refseq database and human organism
+    for ref in human_refseqs:
+        graph.add((ref, db_pred, refseq_db))
+        graph.add((ref, organism_pred, homo_iri))
+
+    # fly mirbase accs are from the mirbase database and drosophila organism
+    for acc in fly_mirbase_accs:
+        graph.add((acc, db_pred, mirbase_acc_db))
+        graph.add((acc, organism_pred, dro_iri))
+
+    # human mirbase accs are from mirbase database and human organism
+    for acc in human_mirbase_accs:
+        graph.add((acc, db_pred, mirbase_acc_db))
+        graph.add((acc, organism_pred, homo_iri))
+
+    with open(targetscan_rdf_path(), 'w') as outfh:
+        outfh.write(graph.serialize(format='nt'))
+
+
+def download_targetscan():
+    fly_dir = os.path.join(targetscan_dir(), 'fly_12')
+    # vert = vertebrates?
+    vert_dir = os.path.join(targetscan_dir(), 'vert_61')
+
+    url = 'http://www.targetscan.org/vert_61/vert_61_data_download/miR_Family_Info.txt.zip'
+    download_and_unzip(url, vert_dir)
+    url = 'http://www.targetscan.org/vert_61/vert_61_data_download/Predicted_Targets_Info.txt.zip'
+    download_and_unzip(url, vert_dir)
+
+    url = 'http://www.targetscan.org/fly_12/fly_12_data_download/flybase2symbol_fly12_targetscan.txt'
+    download_and_unzip(url, fly_dir)
+    url = 'http://www.targetscan.org/fly_12/fly_12_data_download/Conserved_Family_Conserved_Targets_Info.txt.zip'
+    download_and_unzip(url, fly_dir)
+    url = 'http://www.targetscan.org/fly_12/fly_12_data_download/miR_Family_Info.txt.zip'
+    download_and_unzip(url, fly_dir)
+
+
+def gen_targetscan_txt_fields(path):
+    '''
+    Yield the fields in each data line in path, skipping the header line.
+
+    The structure of a targetscan txt file is pretty well formed.
+    Every file starts with a header line giving the column names.
+    Then all the other lines are tab-separated fields.
+    '''
+    with open(path) as fh:
+        for i, line in enumerate(fh):
+            # skip headers
+            if i == 0:
+                continue
+            # lines have '\r\n' endings.  Damn you, Windows!
+            fields = [f.strip() for f in line.split('\t')]
+            yield fields
+
+
+def gen_targetscan_fly_mir_family_info():
+    '''
+    There are some family rows with no Mirbase Acc:
+
+    miR-10-3p/1006	AAAUUCG	dme-miR-10-3p	CAAAUUCGGUUCUAGAGAGGUUU	1	
+    miR-281-2-5p	AGAGAGC	dme-miR-281-2-5p	AAGAGAGCUAUCCGUCGACAGUC	1	
+    miR-2a-1/6/11/13/308	AUCACAG	dme-miR-2a-1	UAUCACAGCCAGCUUUGAUGAGCU	1	
+    miR-2a-2/2c	CACAGCC	dme-miR-2a-2	UCACAGCCAGCUUUGAUGAGCUA	1	
+    miR-10-5p	CCCUGUA	dme-miR-10-5p	ACCCUGUAGAUCCGAAUUUGUU	1	
+    miR-281-1	GUCAUGG	dme-miR-281-1	UGUCAUGGAAUUGCUCUCUUUGU	1	
+    miR-281-2-3p	UGUCAUG	dme-miR-281-2-3p	CUGUCAUGGAAUUGCUCUCUUUG	1	
+    miR-210.2	UGUGCGU	dme-miR-210.2	UUGUGCGUGUGACAGCGGCUAU	1	
+    miR-210.1	UUGUGCG	dme-miR-210.1	CUUGUGCGUGUGACAGCGGCUAU	1	
+    miR-iab4as	UACGUAU	dme-miR-iab4as	UUACGUAUACUGAAGGUAUACCG	1
+
+    Some, like 'dme-miR-210.1' are no where to be found in mirbase.  Others, like
+    'dme-miR-iab4as' are not in mirbase, but a similar (previous) id, like
+    'dme-miR-iab4as-5p', can be found.  Finally, some like 'dme-miR-10-3p' are
+    in mirbase and so they should have a mirbase acc.
+    '''
+    path = os.path.join(targetscan_dir(), 'fly_12', 'miR_Family_Info.txt')
+    # Fields: Family members  Seed+m8 MiRBase ID      Mature sequence Family Conservation?    MiRBase Accession
+    for fields in gen_targetscan_txt_fields(path):
+        family, mirbase_id, mirbase_acc = fields[0], fields[2], fields[5]
+        if not mirbase_acc or not mirbase_id:
+            print fields
+            # Cannot raise exception b/c several rows are missing mirbase_acc.
+            # raise Exception(fields)
+        else:
+            yield family, mirbase_id, mirbase_acc
+
+
+def gen_targetscan_fly_predicted_targets():
+    # Example lines
+    # miR Family      Gene Symbol     Gene Tax ID     UTR start       UTR end MSA start       MSA end Seed match
+    # miR-927 14-3-3epsilon   7260    91      97      154     161     1A
+    # miR-927 14-3-3epsilon   7227    45      51      154     161     1A
+
+    path = os.path.join(targetscan_dir(), 'fly_12',
+                        'Conserved_Family_Conserved_Targets_Info.txt')
+    for fields in gen_targetscan_txt_fields(path):
+        family, gene_symbol, taxon = fields[0], fields[1], fields[2]
+        if taxon == '7227':
+            if not (family and gene_symbol and taxon):
+                raise Exception(fields)
+            else:
+                yield family, gene_symbol
+
+
+def gen_targetscan_fly_gene_to_symbol():
+    # Example lines
+    # gene_id symbol
+    # FBgn0000008     a
+    # FBgn0000011     ab
+    path = os.path.join(targetscan_dir(), 'fly_12',
+                        'flybase2symbol_fly12_targetscan.txt')
+    for fields in gen_targetscan_txt_fields(path):
+        flybase_gene_id, gene_symbol = fields[0], fields[1]
+        if not flybase_gene_id or not gene_symbol:
+            raise Exception(fields)
+        else:
+            yield flybase_gene_id, gene_symbol
+
+
+def gen_targetscan_human_mir_family_info():
+    path = os.path.join(targetscan_dir(), 'vert_61', 'miR_Family_Info.txt')
+    # Fields: miR family      Seed+m8 Species ID      MiRBase ID      Mature sequence Family Conservation?    MiRBase Accession
+    for fields in gen_targetscan_txt_fields(path):
+        family, taxon, mirbase_id, mirbase_acc = fields[0], fields[2], fields[3], fields[6]
+        if taxon == '9606':
+            if not mirbase_acc or not mirbase_id:
+                raise Exception(fields)
+            else:
+                yield family, mirbase_id, mirbase_acc
+
+
+def gen_targetscan_human_predicted_targets():
+    # Example lines
+    # miR Family      Gene ID Gene Symbol     Transcript ID   Species ID      UTR start       UTR end MSA start       MSA end Seed match      PCT
+    # let-7/98/4458/4500      29974   A1CF    NM_001198819    9913    3248    3255    4796    4809    8mer    0.00
+    # let-7/98/4458/4500      29974   A1CF    NM_001198819    9598    3283    3290    4796    4809    8mer    0.00
+
+    path = os.path.join(targetscan_dir(), 'vert_61',
+                        'Predicted_Targets_Info.txt')
+    for fields in gen_targetscan_txt_fields(path):
+        family, refseq_transcript_id, taxon = fields[0], fields[3], fields[4]
+        if taxon == '9606':
+            if not (family and refseq_transcript_id and taxon):
+                raise Exception(fields)
+            else:
+                yield family, refseq_transcript_id
 
 
 ###################
@@ -874,6 +1497,10 @@ def flybase_release_dir(version='FB2013_02'):
     return os.path.join(config.datadir, 'flybase', 'releases', version)
 
 
+def flybase_rdf_path(version='FB2013_02'):
+    return os.path.join(flybase_release_dir(version), 'flybase_{}.nt'.format(version))
+
+
 def gen_flybase_transcript_to_annotation_mapping(version='FB2013_02'):
     '''
     Yield tuples of (organism_abbreviation, transcript_id, annotation_id).
@@ -888,6 +1515,87 @@ def gen_flybase_transcript_to_annotation_mapping(version='FB2013_02'):
                 continue
             organism, trans_id, annot_id = stripped.split('\t')
             yield organism, trans_id, annot_id
+
+
+def write_flybase_rdf():
+    '''
+    '''
+    graph = rdflib.Graph()
+    for taxon, trans_id, anno_id in gen_flybase_transcript_mapping_file():
+        transcript = flybase_transcript_iri(trans_id)
+        annotation = flybase_annotation_iri(anno_id)
+        graph.add((transcript, see_also_pred, annotation))
+        graph.add((transcript, db_pred, flybase_transcript_db))
+        graph.add((annotation, db_pred, flybase_annotation_db))
+
+    outfile = flybase_rdf_path()
+    with open(outfile, 'w') as outfh:
+        outfh.write(graph.serialize(format='nt'))
+
+
+def gen_flybase_transcript_mapping_file():
+    '''
+    Parse FBtr.xml file and yield FlyBase transcript ids (e.g. FBtr0005674) and
+    FlyBase Annotation IDs (e.g.  CG10890-RB) for Drosophila melanogaster.
+    Yield tuples like ('7227', 'FBtr0005088', 'CG17291-RA')
+    '''
+    # The basic structure to parse looks like:
+    # <transcript>
+        # <id acode="id">FBtr0005674</id>
+        # <organism abbreviation="Dmel">...</organism>
+        # <dbxref name="FlyBase Annotation IDs" is_current="1" description="" acode="N/A">CG10890-RB</dbxref>
+        # ...
+    # </transcript>
+    version = 'FB2013_02'
+    taxon = dro_taxon
+    release_dir = flybase_release_dir(version)
+    path = os.path.join(release_dir, 'reporting-xml', 'FBtr.xml')
+    count = 0
+    print path
+    # iterate over complete elements
+    for event, elem in elementtree.iterparse(path):
+        if elem.tag == "transcript":
+            # progress meter
+            count += 1
+            if count % 1000 == 0:
+                print 'Processing transcript #', count
+
+            # Organism
+            org = elem.find('organism').get('abbreviation')
+            # skip non Drosophila melanogaster sequences
+            if org != 'Dmel':
+                continue
+
+            # Flybase Transcript Id
+            tid = elem.find('id').text
+            # confirm that id is a flybase transcript id
+            if not tid.startswith('FBtr'):
+                raise Exception('Expected FlyBase Transcript Id.', tid, org)
+
+            # Flybase Transcript Annotation Ids
+            faids = [e.text for e in elem.findall("./dbxref[@name='FlyBase Annotation IDs']")]
+            if len(faids) > 1:
+                # print 'Multiple FlyBase Annotation IDs.', tid, faids
+                pass
+            if len(faids) == 0:
+                print 'No FlyBase Annotation IDs', tid
+            for faid in faids:
+                if faid.startswith('FBtr'):
+                    # Report and skip instances where a transcript id is in place
+                    # of an annotation id
+                    msg = 'Flybase Transcript Id found where a Flybase '
+                    msg += 'Annotation Id should be. org={}, transcript_id={},'
+                    msg += 'annotation_id={}'
+                    print msg.format(org, tid, faid)
+                elif not flybase_annotation_id_regex.search(faid):
+                    # confirm that faid is a Dmel flybase transcript annotation id
+                    raise Exception('Expected Dmel Transcript Annotation Id. org={}, transcript_id={}, annotation_id={}'.format(org, tid, faid))
+
+                yield (taxon, tid, faid)
+            # try to keep memory from getting too large
+            elem.clear()
+
+
 
 
 def make_flybase_transcript_mapping_file():
@@ -1004,6 +1712,34 @@ def synaptomedb_v1_all_genes_file():
                         'synaptomedb-1.06-all_genes.csv')
 
 
+def synaptomedb_v1_rdf_path():
+    return os.path.join(config.datadir, 'synaptomedb', 'v1.06',
+                        'synaptomedb-1.06.nt')
+
+
+def write_synaptomedb_rdf():
+    graph = rdflib.Graph()
+
+    # describe the IRIs as human, synaptic, ensembl gene
+    for ensembl_gene_id in gen_synaptomedb_ensembl_genes():
+        gene = ensembl_gene_iri(ensembl_gene_id)
+        graph.add((gene, classified_pred, synaptic_iri))
+        graph.add((gene, db_pred, ensembl_gene_db))
+        graph.add((gene, organism_pred, homo_iri))
+
+    with open(synaptomedb_v1_rdf_path(), 'w') as outfh:
+        outfh.write(graph.serialize(format='nt'))
+
+
+def gen_synaptomedb_ensembl_genes():
+
+    genes = parse_synaptomedb_all_genes()
+    ensembl_gene_ids = set([ensembl_gene_id for gene in genes for
+                            ensembl_gene_id in gene['ensembl_gene_ids']])
+    for g in sorted(ensembl_gene_ids):
+        yield g
+
+
 def parse_synaptomedb_all_genes(filename=None):
     '''
     Return a list of genes.  Each gene is a dict containing 'gid' (a synaptome
@@ -1035,6 +1771,9 @@ def parse_synaptomedb_all_genes(filename=None):
 
     return genes
 
+
+#####################
+# OTHER MAIN FUNCTION
 
 def map_human_synaptic_genes_to_human_mirs():
     '''
@@ -1172,6 +1911,14 @@ def main():
     subparser.add_argument('mapping_table')
     subparser.add_argument('not_mapped_list')
 
+    subparser = subparsers.add_parser('write_uniprot_rdf')
+    subparser = subparsers.add_parser('write_microcosm_rdf')
+    subparser = subparsers.add_parser('write_synaptomedb_rdf')
+    subparser = subparsers.add_parser('write_targetscan_rdf')
+    subparser = subparsers.add_parser('write_flybase_rdf')
+    subparser = subparsers.add_parser('write_mirbase_rdf')
+    subparser = subparsers.add_parser('write_roundup_orthologs_rdf')
+
     subparser = subparsers.add_parser('write_fly_mirs_targeting_conserved_synapse_genes')
     subparser = subparsers.add_parser('write_human_mirs_targeting_conserved_synapse_genes')
     subparser = subparsers.add_parser('write_overlap_between_screened_and_predicted_fly_mir_targets')
@@ -1189,6 +1936,9 @@ def main():
 
     subparser = subparsers.add_parser('write_conserved_gene_and_mir_tables', help='')
 
+    subparser = subparsers.add_parser('download_minotar')
+    subparser = subparsers.add_parser('download_targetscan')
+    subparser = subparsers.add_parser('download_mirbase_aliases')
     subparser = subparsers.add_parser('download_microcosm_targets', help='')
     subparser.add_argument('species')
 
