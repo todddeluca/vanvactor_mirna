@@ -1,45 +1,59 @@
-
 import argparse
 import collections
 import contextlib
 import csv
 import itertools
+import json
 import logging
 import os
 import re
 import sqlite3
 import subprocess
-import sys
 import urllib
 import xml.etree.cElementTree as elementtree
 
 import pandas
 import numpy as np
 import rdflib
-from rdflib import URIRef, BNode, Literal
 
 import config
 import temps
 _iri = rdflib.URIRef('')
 
 # RDF URIs and URI generators
+# Real Entities
 dro_iri = rdflib.URIRef('http://purl.uniprot.org/taxonomy/7227')
 homo_iri = rdflib.URIRef('http://purl.uniprot.org/taxonomy/9606')
+muscle_tissue_iri = rdflib.URIRef('http://purl.uniprot.org/tissues/642')
+cns_tissue_iri = rdflib.URIRef('http://purl.uniprot.org/tissues/150')
+# Fake Entities
 synaptic_iri = rdflib.URIRef('http://purl.synaptomedb.org/owl/synaptic')
+five_prime_method_iri = rdflib.URIRef('http://purl.example.com/ibanez/five_prime_method')
+full_seq_method_iri = rdflib.URIRef('http://purl.example.com/ibanez/full_sequence_method')
 
+mcneill_muscle_ng = rdflib.URIRef('http://purl.example.com/graph/mcneill_muscle')
+mcneill_cns_ng = rdflib.URIRef('http://purl.example.com/graph/mcneill_cns')
+ibanez_five_prime_ng = rdflib.URIRef('http://purl.example.com/graph/ibanez_five_prime')
+ibanez_full_sequence_ng = rdflib.URIRef('http://purl.example.com/graph/ibanez_full_sequence')
+
+
+# Real Predicates
 orthologous_to_pred = rdflib.URIRef('http://purl.obolibrary.org/obo/so_orthologous_to')
+homologous_to_pred = rdflib.URIRef('http://purl.obolibrary.org/obo/so_homologous_to')
 organism_pred = rdflib.URIRef('http://purl.uniprot.org/core/organism')
 see_also_pred = rdflib.URIRef('http://www.w3.org/2000/01/rdf-schema#seeAlso')
 classified_pred = rdflib.URIRef('http://purl.uniprot.org/core/classifiedWith')
-targets_pred = rdflib.URIRef('http://purl.mirbase.org/owl/targets')
 type_pred = rdflib.URIRef('http://www.w3.org/1999/02/22-rdf-syntax-ns#type')
 db_pred = rdflib.URIRef('http://purl.uniprot.org/core/database')
+# Fake Predicates
 current_id_pred = rdflib.URIRef('http://purl.mirbase.org/owl/current_id')
 has_id_pred = rdflib.URIRef('http://purl.mirbase.org/owl/has_id')
+targets_pred = rdflib.URIRef('http://purl.mirbase.org/owl/targets')
+regulates_pred = rdflib.URIRef('http://purl.example.com/owl/regulates') # a regulates the gene expression of a gene.
 
-taxon_class = rdflib.URIRef('http://purl.uniprot.org/core/Taxon')
-protein_class = rdflib.URIRef('http://purl.uniprot.org/core/Protein')
-
+# Fake Database IRIs.  Databases represent the origin of a sequence/entity, the
+# scope of an id.  There is probably a better way to represent this, since this
+# seems to conflate the organization and id/sequence type.
 targetscan_mir_family_db = rdflib.URIRef('http://purl.targetscan.org/database/mir_family')
 refseq_db = rdflib.URIRef('http://purl.ncbi.nlm.nih.gov/database/refseq')
 flybase_annotation_db = rdflib.URIRef('http://purl.flybase.org/database/annotation')
@@ -49,6 +63,9 @@ mirbase_acc_db = rdflib.URIRef('http://purl.mirbase.org/database/mirna_acc')
 mirbase_id_db = rdflib.URIRef('http://purl.mirbase.org/database/mirna_id')
 ensembl_gene_db = rdflib.URIRef('http://purl.ensembl.org/database/gene')
 ensembl_transcript_db = rdflib.URIRef('http://purl.ensembl.org/database/transcript')
+affymetrix_probeset_db = rdflib.URIRef('http://purl.affymetrix.com/database/probeset')
+uniprot_db = rdflib.URIRef('http://purl.example.com/database/uniprot')
+
 
 def targetscan_mir_family_iri(family):
     return rdflib.URIRef('http://purl.targetscan.org/mir_family/{}'.format(urllib.quote(family, safe='')))
@@ -80,6 +97,10 @@ def ensembl_transcript_iri(transcript):
 def uniprot_iri(acc):
     return rdflib.URIRef('http://purl.uniprot.org/uniprot/{}'.format(acc))
 
+def affymetrix_probeset_iri(probeset):
+    return rdflib.URIRef('http://purl.affymetrix.com/probeset/{}'.format(probeset))
+
+
 # Structure of a Dmel Transcript Annotation ID
 # http://flybase.org/static_pages/docs/nomenclature/nomenclature3.html#2.4.
 # Annotation IDs are represented in a common way: a species-specific 2
@@ -109,7 +130,10 @@ homo_taxon = '9606'
 # differential gene expression effects.
 screened_mirs = ['dme-miR-34', 'dme-miR-92b', 'dme-miR-137', 'dme-miR-190',
                  'dme-miR-219', 'dme-miR-276a', 'dme-miR-277']
-TISSUES = ['muscle', 'CNS']
+
+muscle_tissue = 'muscle'
+cns_tissue = 'CNS'
+TISSUES = [muscle_tissue, cns_tissue]
 
 # The twenty-seven mirs that were somehow "functionally validated" by McNeill
 # and Van Vactor.
@@ -240,7 +264,7 @@ def drop_database():
 def load_all_tables():
     drop_database()
     load_conserved_synapse_genes_tables()
-    load_2008_fly_human_mir_homologs_table()
+    load_ibanez_fly_human_mir_homologs_table()
     load_experimental_mir_targets_table()
     load_affy_probeset_to_flybase_gene_table()
 
@@ -256,7 +280,7 @@ def load_targetscan_etc():
     # load human mir family to mirbase id and mirbase acc
     return
 
-def load_2008_fly_human_mir_homologs_table():
+def load_ibanez_fly_human_mir_homologs_table():
     '''
     Create a db table containing the fly mirs homologous to human mirs, based
     on the paper "Sequence Relationships among C. elegans, D. melanogaster and
@@ -273,7 +297,7 @@ def load_2008_fly_human_mir_homologs_table():
         conn.execute('drop table if exists {}'.format(table))
         conn.execute('create table {} (dro_mir_id, homo_mir_id, method)'.format(table))
         params = [(dro_mir, homo_mir, method) for dro_mir, homo_mir, method in
-                  gen_2008_fly_human_homologs()]
+                  gen_ibanez_fly_human_homologs()]
         conn.executemany('insert into {} values(?, ?, ?)'.format(table), params)
         table_head(table, conn)
 
@@ -289,7 +313,7 @@ def load_experimental_mir_targets_table():
         conn.execute('drop table if exists {}'.format(table))
         conn.execute('create table {} (mir_id, tissue, affy_probeset_id)'.format(table))
         params = [(mir, tissue, probe) for mir, tissue, probe in 
-                gen_drosophila_experimental_mir_targets()]
+                gen_mcneill_screen_mir_targets()]
         conn.executemany('insert into {} values(?, ?, ?)'.format(table), params)
         table_head(table, conn)
 
@@ -449,6 +473,46 @@ def load_conserved_synapse_genes_tables():
     conn.close()
 
 
+def targetscan_fly_mirs_targeting_conserved_synapse_genes():
+    '''
+    fly targetscan family targeting flybase gene linked to uniprot orthologous
+    to human uniprot linked to human ensembl gene classified with synaptic.
+    '''
+    cmd = '''
+    /Users/td23/data/installs/stardog-1.2.2/stardog query --format JSON "mirna;reasoning=QL" "
+    PREFIX mb:<http://purl.mirbase.org/owl/>
+    PREFIX ts:<http://purl.targetscan.org/owl/>
+    PREFIX obo:<http://purl.obolibrary.org/obo/>
+    PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+    PREFIX up:<http://purl.uniprot.org/core/> 
+    PREFIX taxon:<http://purl.uniprot.org/taxonomy/> 
+    SELECT DISTINCT ?dm
+    WHERE {
+    # human synaptic genes
+    ?hg up:classifiedWith <http://purl.synaptomedb.org/owl/synaptic> .
+    ?hu rdfs:seeAlso ?hg .
+    ?hg up:organism taxon:9606 .
+    # human - fly orthologs
+    ?du obo:so_orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    # fly genes
+    ?du rdfs:seeAlso ?dg .
+    ?dg up:database <http://purl.flybase.org/database/gene> . # and genes
+    # targetscan mirs targeting fly genes
+    ?dm mb:targets ?dg .
+    ?dm up:database <http://purl.targetscan.org/database/mir_family> .
+    } 
+    "
+    '''
+
+    out = subprocess.check_output(cmd, shell=True)
+    result = json.loads(out)
+    # iris are like u'http://purl.targetscan.org/mir_family/miR-33'
+    # or u'http://purl.targetscan.org/mir_family/miR-279%2F286%2F996'
+    mir_family_iris = [binding['dm']['value'] for binding in result['results']['bindings']]
+    return [urllib.unquote(os.path.basename(m)) for m in mir_family_iris]
+
+
 def microcosm_fly_mirs_targeting_conserved_synapse_genes():
     sql = '''select distinct dm2t.mir_id as fly_mir
     from homo_sapiens_synapse_genes hsg
@@ -566,12 +630,53 @@ def write_experimental_mir_targets_genes_lists():
                         fh.write(u'\n')
 
 
+def write_targetscan_human_mirs_targeting_conserved_synapse_genes():
+    cmd = '''
+    /Users/td23/data/installs/stardog-1.2.2/stardog query --format JSON "mirna;reasoning=QL" "
+    PREFIX mb:<http://purl.mirbase.org/owl/>
+    PREFIX ts:<http://purl.targetscan.org/owl/>
+    PREFIX obo:<http://purl.obolibrary.org/obo/>
+    PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+    PREFIX up:<http://purl.uniprot.org/core/> 
+    PREFIX taxon:<http://purl.uniprot.org/taxonomy/> 
+    SELECT DISTINCT ?hm
+    WHERE {
+    # human synaptic genes
+    ?hg up:classifiedWith <http://purl.synaptomedb.org/owl/synaptic> .
+    ?hu rdfs:seeAlso ?hg .
+    ?hg up:organism taxon:9606 .
+    # human - fly orthologs
+    ?du obo:so_orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    # human refseq transcripts
+    ?hu rdfs:seeAlso ?ht .
+    ?ht up:database <http://purl.ncbi.nlm.nih.gov/database/refseq> .
+    ?ht up:organism taxon:9606 .
+    # targetscan mirs targeting human refseq transcripts
+    ?hm mb:targets ?ht .
+    ?hm up:database <http://purl.targetscan.org/database/mir_family> .
+    }
+    "
+    '''
+    out = subprocess.check_output(cmd, shell=True)
+    result = json.loads(out)
+    # iris are like u'http://purl.targetscan.org/mir_family/miR-33'
+    # or u'http://purl.targetscan.org/mir_family/miR-279%2F286%2F996'
+    mir_family_iris = [binding['hm']['value'] for binding in result['results']['bindings']]
+    mirs = sorted([urllib.unquote(os.path.basename(m)) for m in mir_family_iris])
+
+    fn = os.path.join(config.datadir, 'predicted_targetscan_human_mirs_targeting_conserved_synapse_genes.txt')
+    with open(fn, 'w') as fh:
+        fh.write(''.join([mir + '\n' for mir in mirs]))
+
+
 def write_human_mirs_targeting_conserved_synapse_genes():
     '''
     Write a list of human mirs that are predicted to target genes that are
     synaptic genes (according the synapsedb) and orthologous to fly genes.
     '''
-    sql = '''select distinct hm2t.mir_id as human_mir
+    sql = '''
+    select distinct hm2t.mir_id as human_mir
     from homo_sapiens_synapse_genes hsg
     join homo_sapiens_gene_to_uniprot hg2u
     join drosophila_melanogaster_to_homo_sapiens_orthologs d2ho
@@ -588,6 +693,13 @@ def write_human_mirs_targeting_conserved_synapse_genes():
         fh.write(''.join([mir + '\n' for mir in mirs]))
 
 
+def write_targetscan_fly_mirs_targeting_conserved_synapse_genes():
+    fn = os.path.join(config.datadir, 'predicted_targetscan_fly_mirs_targeting_conserved_synapse_genes.txt')
+    mirs = sorted(targetscan_fly_mirs_targeting_conserved_synapse_genes())
+    with open(fn, 'w') as fh:
+        fh.write(''.join([mir + '\n' for mir in mirs]))
+
+
 def write_fly_mirs_targeting_conserved_synapse_genes():
     '''
     Write a list of fly mirs that are predicted to target genes that are
@@ -599,14 +711,54 @@ def write_fly_mirs_targeting_conserved_synapse_genes():
         fh.write(''.join([mir + '\n' for mir in mirs]))
 
 
-def write_overlap_between_validated_fly_mirs_and_predicted_fly_mirs():
+def write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs():
     fn = os.path.join(config.datadir, 'overlap_between_validated_and_predicted_microcosm_fly_mirs.csv')
     predicted = set(microcosm_fly_mirs_targeting_conserved_synapse_genes())
     validated = set(validated_mirs)
     write_set_overlap_file(validated, predicted, 'validated', 'predicted', fn)
 
 
-def write_overlap_between_screened_and_predicted_fly_mir_targets():
+def write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs():
+    fn = os.path.join(config.datadir, 'overlap_between_validated_and_predicted_targetscan_fly_mirs.csv')
+    predicted = set(targetscan_fly_mirs_targeting_conserved_synapse_genes())
+    validated = set(validated_mirs)
+    write_set_overlap_file(validated, predicted, 'validated', 'predicted', fn)
+
+
+def write_overlap_between_screened_and_targetscan_predicted_fly_mir_targets():
+    raise NotImplementedError()
+
+    predicted_sql = '''select distinct dg2u.gene_id as fly_gene_id
+    from drosophila_melanogaster_gene_to_uniprot dg2u
+    join drosophila_melanogaster_transcript_to_uniprot dt2u
+    join drosophila_melanogaster_annotation_to_transcript da2t
+    join drosophila_melanogaster_mir_to_trans dm2t
+    where 1
+    and dg2u.uniprot_id = dt2u.uniprot_id
+    and dt2u.trans_id = da2t.trans_id
+    and da2t.annotation_id = dm2t.trans_id
+    and dm2t.mir_id = ?
+    '''
+
+    screened_sql = '''select distinct ap2g.gene_id as fly_gene_id
+    from drosophila_melanogaster_experimental_mir_targets as demt
+    join affy_probeset_to_flybase_gene ap2g
+    where demt.affy_probeset_id = ap2g.probeset_id
+    and demt.mir_id = ?
+    and demt.tissue = ?
+    '''
+
+    for mir in screened_mirs:
+        for tissue in [cns_tissue]:
+            fn = os.path.join(config.datadir, '{}_{}_overlap_between_screened_and_targetscan_predicted_targets.csv'.format(tissue, mir))
+            with conserved_synapse_genes_db_cm() as conn:
+                print mir, tissue
+                predicted = set([row[0] for row in conn.execute(predicted_sql, [mir])])
+                screened = set([row[0] for row in conn.execute(screened_sql, [mir, tissue])])
+                write_set_overlap_file(screened, predicted, 'screened', 'predicted', fn)
+
+
+def write_overlap_between_screened_and_microcosm_predicted_fly_mir_targets():
 
     predicted_sql = '''select distinct dg2u.gene_id as fly_gene_id
     from drosophila_melanogaster_gene_to_uniprot dg2u 
@@ -663,11 +815,64 @@ def write_set_overlap_file(set1, set2, name1, name2, filename):
             fh.write(','.join([str(i) for i in row]) + '\n')
 
 
-########################
-# FLY-HUMAN MIR HOMOLOGS
+###############################
+# IBANEZ FLY-HUMAN MIR HOMOLOGS
 
 
-def gen_2008_fly_human_homologs():
+def ibanez_mir_homologs_rdf_path():
+    return os.path.join(config.datadir, 'ibanez', '2008', 'ibanez-2008-mir-homologs.trix')
+
+
+def write_ibanez_mir_homologs_rdf():
+    ds = rdflib.Dataset()
+
+    five_prime_graph = ds.graph(ibanez_five_prime_ng)
+    make_ibanez_mir_homologs_method_graph(FIVE_PRIME, five_prime_graph)
+
+    full_seq_graph = ds.graph(ibanez_full_sequence_ng)
+    make_ibanez_mir_homologs_method_graph(SEVENTY_PERCENT, full_seq_graph)
+
+    with open(ibanez_mir_homologs_rdf_path(), 'w') as outfh:
+        outfh.write(ds.serialize(format='trix'))
+
+
+def make_ibanez_mir_homologs_method_graph(method, graph):
+    '''
+    Write the homologs for a specific method to a
+    method: '5_prime_sequence_homolog' or '70_percent_full_sequence_homolog'
+    '''
+
+    print 'Populating graph for Ibanez 2008 miR fly-human homologs for method {}'.format(method)
+    fly_mirs = set()
+    human_mirs = set()
+
+    for fly_mir_id, human_mir_id, meth in gen_ibanez_fly_human_homologs():
+        if meth != method:
+            continue
+
+        fly_mir = mirbase_id_iri(fly_mir_id)
+        human_mir = mirbase_id_iri(human_mir_id)
+        graph.add((fly_mir, homologous_to_pred, human_mir))
+
+        # Examine whether there is a many-to-many mapping of these mirs
+        if fly_mir in fly_mirs:
+            print 'fly mir appears twice', fly_mir_id, human_mir_id, method
+        if human_mir in human_mirs:
+            print 'human mir appears twice', fly_mir_id, human_mir_id, method
+
+        fly_mirs.add(fly_mir)
+        human_mirs.add(human_mir)
+
+    for mir in fly_mirs:
+        graph.add((mir, db_pred, mirbase_id_db))
+        graph.add((mir, organism_pred, dro_iri))
+
+    for mir in human_mirs:
+        graph.add((mir, db_pred, mirbase_id_db))
+        graph.add((mir, organism_pred, homo_iri))
+
+
+def gen_ibanez_fly_human_homologs():
     '''
     From PLoS ONE. 2008; 3(7): e2818.
     Published online 2008 July 30. doi:  10.1371/journal.pone.0002818
@@ -679,7 +884,8 @@ def gen_2008_fly_human_homologs():
     full sequence homology" and "5-prime sequence homology" methods for
     asserting homology between fly and human mirs from the paper.
     '''
-    fn = os.path.join(config.datadir, '2008_Ibanez-Ventoso_drosophila_melanogaster_homo_sapiens_mir_orthologs.csv')
+    fn = os.path.join(config.datadir, 'ibanez', '2008',
+                      '2008_Ibanez-Ventoso_drosophila_melanogaster_homo_sapiens_mir_orthologs.csv')
     with open(fn) as fh:
         reader = csv.reader(fh)
         current_dro_mir = None
@@ -705,12 +911,12 @@ def gen_2008_fly_human_homologs():
                 yield current_dro_mir, full_homo_mir, SEVENTY_PERCENT
 
 
-def print_2008_fly_human_homologs():
+def print_ibanez_fly_human_homologs():
     '''
     See what the generated tuples of human-fly mir homologs look like to make
     sure they do not look wrong.
     '''
-    for dro_mir, homo_mir, method in gen_2008_fly_human_homologs():
+    for dro_mir, homo_mir, method in gen_ibanez_fly_human_homologs():
         print method, dro_mir, homo_mir
 
 
@@ -913,6 +1119,7 @@ def write_uniprot_rdf():
     for taxon, uniprots in uniprots_map.items():
         for uni in uniprots:
             graph.add((uni, organism_pred, taxon))
+            graph.add((uni, db_pred, uniprot_db))
 
     with open(uniprot_rdf_path(), 'w') as outfh:
         outfh.write(graph.serialize(format='nt'))
@@ -999,16 +1206,17 @@ def map_ids_to_uniprot(ids, id_type):
 
 #################################
 # VAN VACTOR / MCNEILL EXPERIMENT
+# MCNEILL SCREEN
 
-
-def gen_drosophila_experimental_mir_targets():
+def gen_mcneill_screen_mir_targets():
     '''
     Generate a tuple for every row in the CSV file containing the experimental
     results for affymetrix probesets that were differentially expressed in
     drosophila 'muscle' and 'CNS' tissues when 7 miRs were (individually)
     perturbed.
     '''
-    fn = os.path.join(config.datadir, '20130523_vanvactor_fly_tissue_7_mir_targets.csv')
+    fn = os.path.join(config.datadir, 'mcneill', '20130523',
+                      '20130523_vanvactor_fly_tissue_7_mir_targets.csv')
     with open(fn) as fh:
         reader = csv.reader(fh)
         for i, row in enumerate(reader):
@@ -1023,9 +1231,94 @@ def gen_drosophila_experimental_mir_targets():
             yield mir_id, tissue, probeset_id
 
 
+def mcneill_screen_muscle_rdf_path():
+    return os.path.join(config.datadir, 'mcneill', '20130523', 'mcneill_screen_muscle.nt')
+
+
+def mcneill_screen_rdf_path():
+    return os.path.join(config.datadir, 'mcneill', '20130523', 'mcneill_screen.trix')
+
+
+def mcneill_screen_cns_rdf_path():
+    return os.path.join(config.datadir, 'mcneill', '20130523', 'mcneill_screen_CNS.nt')
+
+
+def write_mcneill_screen_rdf():
+    '''
+    Write an rdf file for muscle tissue and one for CNS tissue results from
+    Elizabeth McNeill's expression array screen of 7 fly miRs.
+
+    Example rdf triples showing the regulates predicate and annotating each mir and
+    probeset with database and taxon:
+
+        <http://purl.mirbase.org/mirna_id/dme-miR-34> <http://purl.example.com/owl/regulates> <http://purl.affymetrix.com/probeset/1626730_s_at> .
+        <http://purl.affymetrix.com/probeset/1626730_s_at> <http://purl.uniprot.org/core/organism> <http://purl.uniprot.org/taxonomy/7227> .
+        <http://purl.affymetrix.com/probeset/1626730_s_at> <http://purl.uniprot.org/core/database> <http://purl.affymetrix.com/database/probeset> .
+        <http://purl.mirbase.org/mirna_id/dme-miR-34> <http://purl.uniprot.org/core/database> <http://purl.mirbase.org/database/mirna_id> .
+        <http://purl.mirbase.org/mirna_id/dme-miR-34> <http://purl.uniprot.org/core/organism> <http://purl.uniprot.org/taxonomy/7227> .
+    '''
+    ds = rdflib.Dataset()
+
+    muscle_graph = ds.graph(mcneill_muscle_ng)
+    make_mcneill_screen_tissue_graph(muscle_tissue, muscle_graph)
+
+    cns_graph = ds.graph(mcneill_cns_ng)
+    make_mcneill_screen_tissue_graph(cns_tissue, cns_graph)
+
+    with open(mcneill_screen_rdf_path(), 'w') as outfh:
+        outfh.write(ds.serialize(format='trix'))
+
+
+def make_mcneill_screen_tissue_graph(tissue, graph):
+    mirs = set()
+    probesets = set()
+
+    for mir_id, tissue, probeset_id in gen_mcneill_screen_mir_targets():
+        mir = mirbase_id_iri(mir_id)
+        probeset = affymetrix_probeset_iri(probeset_id)
+        graph.add((mir, regulates_pred, probeset))
+        mirs.add(mir)
+        probesets.add(probeset)
+
+    for mir in mirs:
+        graph.add((mir, db_pred, mirbase_id_db))
+        graph.add((mir, organism_pred, dro_iri))
+
+    for probeset in probesets:
+        graph.add((probeset, db_pred, affymetrix_probeset_db))
+        graph.add((probeset, organism_pred, dro_iri))
+
+
 
 ############
 # AFFYMETRIX
+
+
+def affymetrix_fly_annotations_rdf_path():
+    return os.path.join(config.datadir, 'affymetrix', 'na33', 'Drosophila_2.na33.annot.nt')
+
+
+def write_affymetrix_fly_annotations_rdf():
+    graph = rdflib.Graph()
+    fly_genes = set()
+    for probeset_id, gene_id in gen_affymetrix_fly_probe_to_flybase_mapping():
+        gene = flybase_gene_iri(gene_id)
+        probeset = affymetrix_probeset_iri(probeset_id)
+        # Should this be see_also or something indicating that the probeset
+        # binds to the gene transcript.
+        graph.add((probeset, see_also_pred, gene))
+        graph.add((probeset, db_pred, affymetrix_probeset_db))
+        graph.add((probeset, organism_pred, dro_iri))
+        fly_genes.add(gene)
+
+    # since genes might appear more than once in the mapping data, collect
+    # them into a set and only make triples for them once.
+    for gene in fly_genes:
+        graph.add((gene, db_pred, flybase_gene_db))
+        graph.add((gene, organism_pred, dro_iri))
+
+    with open(affymetrix_fly_annotations_rdf_path(), 'w') as outfh:
+        outfh.write(graph.serialize(format='nt'))
 
 
 def download_affymetrix_fly_annotations_file():
@@ -1250,6 +1543,16 @@ def download_minotar():
     human_dir = os.path.join(minotar_dir, 'homo_sapiens')
     fly_dir = os.path.join(minotar_dir, 'drosophila_melanogaster')
 
+    print 'Downloading MinoTar supporting data from TargetScanFly version fly_52orfs.'
+    orfs_dir = os.path.join(targetscan_top_dir(), 'fly_52orfs')
+    url = 'http://www.targetscan.org/fly_52orfs/fly_52orfs_data_download/miR_Family_Info.txt.zip'
+    download_and_unzip(url, orfs_dir)
+    url = 'http://www.targetscan.org/fly_52orfs/fly_52orfs_data_download/ORF_Sequences.txt.zip'
+    download_and_unzip(url, orfs_dir)
+    url = 'http://www.targetscan.org/fly_52orfs/fly_52orfs_data_download/Predicted_Targets_Info.txt.zip'
+    download_and_unzip(url, orfs_dir)
+
+    print 'Downloading MinoTar data files.'
     url = 'http://www.flyrnai.org/supplement/HumanUniqueMirnas.txt'
     download_and_unzip(url, human_dir)
     url = 'http://www.flyrnai.org/supplement/HumanConservedSeedsConservedTargs.zip'
@@ -1260,12 +1563,17 @@ def download_minotar():
     download_and_unzip(url, fly_dir)
 
 
+
 ############
 # TARGETSCAN
 
 
 def targetscan_dir(version='6.2'):
-    return os.path.join(config.datadir, 'targetscan', '6.2')
+    return os.path.join(targetscan_top_dir(), '6.2')
+
+
+def targetscan_top_dir(version='6.2'):
+    return os.path.join(config.datadir, 'targetscan')
 
 
 def targetscan_rdf_path(version='6.2'):
@@ -1911,6 +2219,9 @@ def main():
     subparser.add_argument('mapping_table')
     subparser.add_argument('not_mapped_list')
 
+    subparser = subparsers.add_parser('write_ibanez_mir_homologs_rdf')
+    subparser = subparsers.add_parser('write_mcneill_screen_rdf')
+    subparser = subparsers.add_parser('write_affymetrix_fly_annotations_rdf')
     subparser = subparsers.add_parser('write_uniprot_rdf')
     subparser = subparsers.add_parser('write_microcosm_rdf')
     subparser = subparsers.add_parser('write_synaptomedb_rdf')
@@ -1919,12 +2230,17 @@ def main():
     subparser = subparsers.add_parser('write_mirbase_rdf')
     subparser = subparsers.add_parser('write_roundup_orthologs_rdf')
 
+    subparser = subparsers.add_parser('write_targetscan_fly_mirs_targeting_conserved_synapse_genes')
+    subparser = subparsers.add_parser('write_targetscan_human_mirs_targeting_conserved_synapse_genes')
+    subparser = subparsers.add_parser('write_overlap_between_screened_and_targetscan_predicted_fly_mir_targets')
+    subparser = subparsers.add_parser('write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs')
+
     subparser = subparsers.add_parser('write_fly_mirs_targeting_conserved_synapse_genes')
     subparser = subparsers.add_parser('write_human_mirs_targeting_conserved_synapse_genes')
-    subparser = subparsers.add_parser('write_overlap_between_screened_and_predicted_fly_mir_targets')
-    subparser = subparsers.add_parser('write_overlap_between_validated_fly_mirs_and_predicted_fly_mirs')
-    subparser = subparsers.add_parser('load_2008_fly_human_mir_homologs_table')
-    subparser = subparsers.add_parser('print_2008_fly_human_homologs')
+    subparser = subparsers.add_parser('write_overlap_between_screened_and_microcosm_predicted_fly_mir_targets')
+    subparser = subparsers.add_parser('write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs')
+    subparser = subparsers.add_parser('load_ibanez_fly_human_mir_homologs_table')
+    subparser = subparsers.add_parser('print_ibanez_fly_human_homologs')
     subparser = subparsers.add_parser('write_experimental_mir_targets_genes_lists')
     subparser = subparsers.add_parser('load_affy_probeset_to_flybase_gene_table')
     subparser = subparsers.add_parser('load_experimental_mir_targets_table')
