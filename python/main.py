@@ -148,17 +148,17 @@ muscle_tissue = 'muscle'
 cns_tissue = 'CNS'
 TISSUES = [muscle_tissue, cns_tissue]
 
-# The twenty-seven mirs that were functionally validated by McNeill
-# and Van Vactor, by looking for morphological changes in the muscle phenotype.
+# The twenty-six (formerly twenty-seven before the non-existent dme-miR-953 was
+# dropped) mirs that were functionally validated by McNeill # and Van Vactor,
+# by looking for morphological changes in the muscle phenotype.
 original_validated_mirs = [
     'dme-miR-8', 'dme-miR-13a', 'dme-miR-14', 'dme-miR-34', 'dme-miR-92a',
     'dme-miR-92b', 'dme-miR-190', 'dme-miR-137', 'dme-miR-219', 'dme-miR-276a',
     'dme-miR-277', 'dme-miR-279', 'dme-miR-287', 'dme-miR-304', 'dme-miR-308',
-    'dme-miR-313', 'dme-miR-314', 'dme-miR-316', 'dme-miR-932', 'dme-miR-953',
-    'dme-miR-969', 'dme-miR-970', 'dme-miR-978', 'dme-miR-979', 'dme-miR-982',
-    'dme-miR-999', 'dme-miR-1014']
-# Twenty-six mirs have current miRBase ids.  One 'dme-miR-953' is not in
-# miRBase.  Strange.
+    'dme-miR-313', 'dme-miR-314', 'dme-miR-316', 'dme-miR-932', 'dme-miR-969',
+    'dme-miR-970', 'dme-miR-978', 'dme-miR-979', 'dme-miR-982', 'dme-miR-999',
+    'dme-miR-1014']
+# Twenty-six mirs have current miRBase ids.
 validated_mirs = [
     u'dme-miR-8-3p', u'dme-miR-13a-3p', u'dme-miR-14-3p', u'dme-miR-34-5p',
     u'dme-miR-92a-3p', u'dme-miR-92b-3p', u'dme-miR-190-5p', u'dme-miR-137-3p',
@@ -2523,6 +2523,26 @@ def parse_synaptomedb_all_genes(filename=None):
             # fields
 
     return genes
+
+
+############################
+# PINK SET LOF/GOF GENE LIST
+
+def pink_set_path():
+    return os.path.join(config.datadir, 'NMJ RNAi Search File.txt')
+
+
+def pink_genes():
+    '''
+    Return a list of flybase gene.
+
+    The hits from three different screens (Aaron D'Antonio, Sanyal and
+    Featherstone).  This contains FBgn IDs, which can be converted to gene
+    symbols using flybase ID converter 
+    '''
+    with open(pink_set_path()) as fh:
+        return [line.strip() for i, line in enumerate(fh) if i > 0 and line.strip()]
+
 
 
 #####################
