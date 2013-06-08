@@ -1179,16 +1179,21 @@ def write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets(
 def write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes():
     nmj_rnai = set(get_nmj_rnai_genes())
     for mir in screened_mirs:
+        for tissue in TISSUES:
+            screened_targets = set(screened_fly_mir_targets_in_tissue(mir, tissue))
+            fn = os.path.join(config.datadir, '{}_{}_overlap_between_nmj_rnai_genes_and_screened_fly_targets.csv'.format(mir, tissue))
+            write_set_overlap_file(nmj_rnai, screened_targets, 'nmj_rnai_genes', 'screened', fn)
+
+
+def write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes():
+    nmj_rnai = set(get_nmj_rnai_genes())
+    for mir in validated_mirs:
         microcosm_targets = set(mircocosm_predicted_fly_mir_targets(mir))
         fn = os.path.join(config.datadir, '{}_overlap_between_nmj_rnai_genes_and_microcosm_fly_targets.csv'.format(mir))
         write_set_overlap_file(nmj_rnai, microcosm_targets, 'nmj_rnai_genes', 'microcosm', fn)
         targetscan_targets = set(targetscan_predicted_fly_mir_targets(mir))
         fn = os.path.join(config.datadir, '{}_overlap_between_nmj_rnai_genes_and_targetscan_fly_targets.csv'.format(mir))
         write_set_overlap_file(nmj_rnai, targetscan_targets, 'nmj_rnai_genes', 'targetscan', fn)
-        for tissue in TISSUES:
-            screened_targets = set(screened_fly_mir_targets_in_tissue(mir, tissue))
-            fn = os.path.join(config.datadir, '{}_{}_overlap_between_nmj_rnai_genes_and_screened_fly_targets.csv'.format(mir, tissue))
-            write_set_overlap_file(nmj_rnai, screened_targets, 'nmj_rnai_genes', 'screened', fn)
 
 
 def write_overlap_between_screened_and_targetscan_predicted_fly_mir_targets():
@@ -2731,6 +2736,7 @@ def main():
     subparser = subparsers.add_parser('write_overlap_between_microcosm_fly_mirs_and_targetscan_fly_mirs')
     subparser = subparsers.add_parser('write_overlap_between_microcosm_human_mirs_and_targetscan_human_mirs')
 
+    subparser = subparsers.add_parser('write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes')
     subparser = subparsers.add_parser('write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes')
     subparser = subparsers.add_parser('write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets')
 
