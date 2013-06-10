@@ -12,11 +12,10 @@ import subprocess
 import urllib
 import xml.etree.cElementTree as elementtree
 
-import pandas
-import numpy as np
 import rdflib
 
 import config
+import secrets
 import temps
 _iri = rdflib.URIRef('')
 
@@ -495,20 +494,25 @@ def load_conserved_synapse_genes_tables():
 # RDF GRAPH DATABASE FUNCTIONS
 
 
+def stardog_json_query(query):
+    cmd = 'stardog --username {} --passwd {} query'.format(
+        secrets.stardog_user, secrets.stardog_password)
+    cmd += ' --format JSON'
+    cmd += ' "mirna;reasoning=QL"'
+    cmd += ' "' + query + '"'
+    print 'stardog_json_query()'
+    print cmd
+    out = subprocess.check_output(cmd, shell=True)
+    return json.loads(out)
+
+
 def query_for_ids(query, binding):
     '''
     Wrap a sparql query into a call to stardog, and parse out the id value of 
     the results for the given binding.  The binding values should be IRIs of
     the form "http://example.com/path/to/id".  Return a list of ids.
     '''
-    cmd = '/Users/td23/data/installs/stardog-1.2.2/stardog query'
-    cmd += ' --format JSON'
-    cmd += ' "mirna;reasoning=QL"'
-    cmd += ' "' + query + '"'
-    print 'query_for_ids()'
-    print cmd
-    out = subprocess.check_output(cmd, shell=True)
-    result = json.loads(out)
+    result = stardog_json_query(query)
     # IRIs are like u'http://purl.targetscan.org/mir_family/miR-33'
     # or u'http://purl.targetscan.org/mir_family/miR-279%2F286%2F996'
     iris = [b[binding]['value'] for b in result['results']['bindings']]
@@ -552,7 +556,10 @@ def rdf_database_name():
 
 
 def drop_rdf_database():
-    call('time stardog-admin db drop ' + rdf_database_name())
+    cmd = 'time stardog-admin db drop --username {} --passwd {}'.format(
+        secrets.stardog_admin_user, secrets.stardog_admin_password)
+    cmd += ' ' + rdf_database_name()
+    call(cmd)
 
 
 def load_rdf_database():
@@ -571,9 +578,13 @@ def load_rdf_database():
         synaptomedb_v1_rdf_path(),
         targetscan_rdf_path(),
         uniprot_rdf_path(),
+        os.path.join(config.datadir, 'obo', 'so.owl'),
     ]
-    call('time stardog-admin db create -n {} '.format(rdf_database_name()) + 
-         ' '.join(rdf_paths))
+    cmd = 'time stardog-admin db create --username {} --passwd {}'.format(
+        secrets.stardog_admin_user, secrets.stardog_admin_password)
+    cmd += ' --name {} {}'.format(rdf_database_name(), ' '.join(rdf_paths))
+    call(cmd)
+
 
 
 def write_all_rdf():
@@ -609,10 +620,8 @@ def update_mirbase_ids(mirbase_ids):
     '''
     # Generate URIs for the mirbase ids
     mids = [mirbase_id_iri(mirbase_id) for mirbase_id in mirbase_ids + ['foobar']]
-    # Query stardog for a mapping from original id to current id
-    cmd = '''
-    /Users/td23/data/installs/stardog-1.2.2/stardog query --format JSON "mirna;reasoning=QL" "
-    ''' + prefixes() + '''
+    # Query for a mapping from original id to current id
+    query = prefixes() + '''
     SELECT DISTINCT ?dm_old ?dm
     WHERE {
     VALUES ?dm_old { ''' + ' '.join(['<{}>'.format(mid) for mid in mids]) + ''' }
@@ -626,8 +635,7 @@ def update_mirbase_ids(mirbase_ids):
     }
     "
     '''
-    out = subprocess.check_output(cmd, shell=True)
-    result = json.loads(out)
+    result = stardog_json_query(query)
     # iris are like u'http://purl.targetscan.org/mir_family/miR-33'
     # or u'http://purl.targetscan.org/mir_family/miR-279%2F286%2F996'
     lookup = dict((os.path.basename(b['dm_old']['value']), 
@@ -774,23 +782,29 @@ def microcosm_fly_mirs_targeting_conserved_synapse_genes():
     ?hg up:organism taxon:9606 .
     ?hg up:database db:ensembl_gene .
     ?hu rdfs:seeAlso ?hg .
+
     # human - fly orthologs
     ?hu up:organism taxon:9606.
     ?du obo:so_orthologous_to ?hu .
     ?du up:organism taxon:7227 .
+
     # fly transcrips
     ?du rdfs:seeAlso ?dt .
     ?dt up:database db:flybase_transcript .
+
     # fly annotations
     ?dt rdfs:seeAlso ?da .
     ?da up:database db:flybase_annotation .
+
     # microcosm mirbase ids targeting fly annotation ids
     ?dm_old mb:targets ?da .
+
     # convert old mirbase ids to mirbase accs
     ?dma mb:has_id ?dm_old .
-    # convert mirbase accs to current mirbase ids
     ?dma up:database db:mirbase_acc .
     ?dma a mb:mature_mirna .
+
+    # convert mirbase accs to current mirbase ids
     ?dma mb:current_id ?dm .
     }
     '''
@@ -2528,23 +2542,31 @@ def parse_synaptomedb_all_genes(filename=None):
         filename = synaptomedb_v1_all_genes_file()
 
     genes = []
-    df = pandas.read_csv(filename)
-    for i, row in df.iterrows():
-        gid = row['gid']
-        gene_symbol = row['gene_symbol']
-        gene_info = row['gene_info']
-        ensembl_gene_ids = row['ensembl_gene_id'].split('; ') if row['ensembl_gene_id'] is not np.nan else []
-        ensembl_trans_ids = row['ensembl_trans_id'].split('; ') if row['ensembl_trans_id'] is not np.nan else []
-        genes.append({'gid': gid, 'gene_symbol': gene_symbol,  'gene_info': gene_info,  'ensembl_gene_ids': ensembl_gene_ids, 'ensembl_trans_ids': ensembl_trans_ids})
+    with open(filename) as fh:
+        reader = csv.reader(fh)
+        current_dro_mir = None
+        for i, row in enumerate(reader):
+            # row 0 is a header row
+            if i < 1:
+                continue
 
-    # with open(filename) as fh:
-        # reader =csv.reader
-        # for line in fh:
-            # # skip comments and blank lines
-            # lstripped = line.lstrip()
-            # if lstripped.startswith('#') or not lstripped:
-                # continue
-            # fields
+            gid = row['gid']
+            gene_symbol = row['gene_symbol']
+            gene_info = row['gene_info']
+            ensembl_gene_ids = row['ensembl_gene_id'].split('; ') if row['ensembl_gene_id'] else []
+            ensembl_trans_ids = row['ensembl_trans_id'].split('; ') if row['ensembl_trans_id'] else []
+            genes.append({'gid': gid, 'gene_symbol': gene_symbol,  'gene_info':
+                          gene_info,  'ensembl_gene_ids': ensembl_gene_ids,
+                          'ensembl_trans_ids': ensembl_trans_ids})
+
+    # df = pandas.read_csv(filename)
+    # for i, row in df.iterrows():
+        # gid = row['gid']
+        # gene_symbol = row['gene_symbol']
+        # gene_info = row['gene_info']
+        # ensembl_gene_ids = row['ensembl_gene_id'].split('; ') if row['ensembl_gene_id'] is not np.nan else []
+        # ensembl_trans_ids = row['ensembl_trans_id'].split('; ') if row['ensembl_trans_id'] is not np.nan else []
+        # genes.append({'gid': gid, 'gene_symbol': gene_symbol,  'gene_info': gene_info,  'ensembl_gene_ids': ensembl_gene_ids, 'ensembl_trans_ids': ensembl_trans_ids})
 
     return genes
 

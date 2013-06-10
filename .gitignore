@@ -1,5 +1,10 @@
 
 
+##########################################
+# Do not check secrets into source control
+secrets/
+secrets.py
+
 #########
 # Backups
 *~
