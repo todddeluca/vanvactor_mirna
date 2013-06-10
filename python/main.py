@@ -806,6 +806,7 @@ def microcosm_fly_mirs_targeting_conserved_synapse_genes():
 
     # convert mirbase accs to current mirbase ids
     ?dma mb:current_id ?dm .
+    ?dm up:database db:mirbase_id .
     }
     '''
     return query_for_ids(query, 'dm')
