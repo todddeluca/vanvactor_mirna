@@ -9,17 +9,14 @@ import collections
 import contextlib
 import csv
 import itertools
-import json
 import logging
 import os
 import re
 import sqlite3
 import subprocess
-import urllib
 import xml.etree.cElementTree as elementtree
 
 import config
-import secrets
 import temps
 
 
@@ -197,8 +194,6 @@ def drop_database():
 def load_all_tables():
     drop_database()
     load_conserved_synapse_genes_tables()
-    load_ibanez_fly_human_mir_homologs_table()
-    load_experimental_mir_targets_table()
     load_affy_probeset_to_flybase_gene_table()
 
 
@@ -212,43 +207,6 @@ def load_targetscan_etc():
     # load human mir family to ncbi gene id
     # load human mir family to mirbase id and mirbase acc
     return
-
-def load_ibanez_fly_human_mir_homologs_table():
-    '''
-    Create a db table containing the fly mirs homologous to human mirs, based
-    on the paper "Sequence Relationships among C. elegans, D. melanogaster and
-    Human microRNAs Highlight the Extensive Conservation of microRNAs in
-    Biology" by Carolina Ibanez-Ventoso, Mehul Vora, and Monica Driscoll.
-
-    The table contains a column for the drosophila mir id, the homo mir id, and
-    the method used to assert the homologous relationship.  The two methods
-    used in the paper were 5-prime sequence homology and greater than 70% full
-    sequence homology.
-    '''
-    with conserved_synapse_genes_db_cm() as conn:
-        table = '{}_{}_mir_homologs'.format(dro, homo)
-        conn.execute('drop table if exists {}'.format(table))
-        conn.execute('create table {} (dro_mir_id, homo_mir_id, method)'.format(table))
-        params = [(dro_mir, homo_mir, method) for dro_mir, homo_mir, method in
-                  gen_ibanez_fly_human_homologs()]
-        conn.executemany('insert into {} values(?, ?, ?)'.format(table), params)
-        table_head(table, conn)
-
-
-def load_experimental_mir_targets_table():
-    '''
-    Create a db table containing the mirs, differentially expressed affy
-    probeset ids, and tissue condition of the experiments done by Elizabeth
-    McNeill and Davie Van Vactor.
-    '''
-    with conserved_synapse_genes_db_cm() as conn:
-        table = '{}_experimental_mir_targets'.format(dro)
-        conn.execute('drop table if exists {}'.format(table))
-        conn.execute('create table {} (mir_id, tissue, affy_probeset_id)'.format(table))
-        params = [(mir, tissue, probe) for mir, tissue, probe in 
-                gen_mcneill_screen_mir_targets()]
-        conn.executemany('insert into {} values(?, ?, ?)'.format(table), params)
-        table_head(table, conn)
 
 
 def load_affy_probeset_to_flybase_gene_table():
@@ -682,21 +640,6 @@ def gen_uniprot_id_mappings(id_type=None):
     with open(path) as fh:
         for line in fh:
             yield line.rstrip('\n').split('\t')
-
-
-def guess_uniprot_mapping_idtype(identifer):
-    '''
-    Given an identifier of an unknown type, find the first (if any) id that
-    matches the identifier in the uniprot idmapping file.  Return the type
-    of that id.
-
-    This can be useful for figuring out the exact name of the id type
-    of your ids.
-    '''
-    for uniprot, id_type, mapped in gen_uniprot_id_mappings():
-        if identifier == mapped:
-            print id_type
-            return id_type
 
 
 def map_ids_to_uniprot(ids, id_type):
@@ -1256,7 +1199,6 @@ def parse_synaptomedb_all_genes(filename=None):
     genes = []
     with open(filename) as fh:
         reader = csv.reader(fh)
-        current_dro_mir = None
         for i, row in enumerate(reader):
             # row 0 is a header row
             if i < 1:

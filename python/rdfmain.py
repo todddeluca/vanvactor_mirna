@@ -361,23 +361,6 @@ def load_virtuoso_database():
         virt7.load_graph(graph, filename)
 
 
-def write_all_rdf():
-    '''
-    Write all the RDF files (I hope) in one go.  This will take a little while.
-    Get a cup of coffee.  Stretch your hip flexors.
-    '''
-    write_affymetrix_fly_annotations_rdf()
-    write_flybase_rdf()
-    write_ibanez_mir_homologs_rdf()
-    write_mcneill_screen_rdf()
-    write_microcosm_rdf()
-    write_mirbase_rdf()
-    write_roundup_orthologs_rdf()
-    write_synaptomedb_rdf()
-    write_targetscan_rdf()
-    write_uniprot_rdf()
-
-
 ################
 # SPARQL QUERIES
 
@@ -1324,7 +1307,7 @@ def gen_uniprot_id_mappings(id_type=None):
             yield line.rstrip('\n').split('\t')
 
 
-def guess_uniprot_mapping_idtype(identifer):
+def guess_uniprot_mapping_idtype(identifier):
     '''
     Given an identifier of an unknown type, find the first (if any) id that
     matches the identifier in the uniprot idmapping file.  Return the type

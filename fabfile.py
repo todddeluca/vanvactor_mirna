@@ -24,7 +24,7 @@ from __future__ import print_function
 import StringIO
 import os
 
-from fabric.api import cd, env, execute, put, require, run, task
+from fabric.api import env, execute, put, require, run, task
 
 import fabvenv
 
