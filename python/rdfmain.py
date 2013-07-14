@@ -15,8 +15,10 @@ import re
 import subprocess
 import urllib
 import xml.etree.cElementTree as elementtree
+import StringIO
 
 import rdflib
+import requests
 
 import config
 import secrets
@@ -61,8 +63,9 @@ mcneill_muscle_ng = rdflib.URIRef('http://purl.example.com/graph/mirna_mcneill_m
 # Fake Classes
 mature_mirna_cl = rdflib.URIRef('http://purl.mirbase.org/owl/mature_mirna')
 # A real class for mature microRNAs exists in Sequence Ontology.  I am not
-# using it because it is not readable (in a SPARQL query) and I'm not 100%
-# certain that it refers to the same sense of mature as in miRBase.
+# using it because it is not readable (in a SPARQL query).  I did ask on the
+# SO mailing list and OBO discuss list and Andy from flybase says that yes
+# they use it to annotate mirbase mature mirnas.
 # http://purl.obolibrary.org/obo/SO_0000276
 
 # Real Predicates
@@ -218,6 +221,14 @@ def call(cmd):
     return subprocess.check_call(cmd, shell=True)
 
 
+def makefiledirs(path, mode=0775):
+    '''
+    Idempotent function for making any non-existent directories for the
+    file path `path`.  Returns path.
+    '''
+    makedirs(os.path.dirname(path), mode=mode)
+    return path
+
 def makedirs(path, mode=0775):
     '''
     Idempotent function for making a directory.  If path is not a directory,
@@ -356,8 +367,10 @@ def load_virtuoso_database():
     for filename, graph in all_rdf_files_and_graphs():
         # drop any existing graph
         if sparq.exists_graph(graph):
+            print 'dropping graph {}'.format(graph)
             sparq.drop_graph(graph)
         # load files into graph, one at a time
+        print 'loading graph {}'.format(graph)
         virt7.load_graph(graph, filename)
 
 
@@ -462,7 +475,7 @@ def targetscan_fly_mirs_targeting_conserved_synapse_genes():
     ?hu rdfs:seeAlso ?hg .
 
     # human - fly orthologs
-    ?hu up:organism taxon:9606.
+    ?hu up:organism taxon:9606 .
     ?du obo:orthologous_to ?hu .
     ?du up:organism taxon:7227 .
 
@@ -500,7 +513,7 @@ def microcosm_human_mirs_targeting_conserved_synapse_genes():
     ?hu rdfs:seeAlso ?hg .
 
     # human - fly orthologs
-    ?hu up:organism taxon:9606.
+    ?hu up:organism taxon:9606 .
     ?du obo:orthologous_to ?hu .
     ?du up:organism taxon:7227 .
 
@@ -541,7 +554,7 @@ def microcosm_fly_mirs_targeting_conserved_synapse_genes():
     ?hu rdfs:seeAlso ?hg .
 
     # human - fly orthologs
-    ?hu up:organism taxon:9606.
+    ?hu up:organism taxon:9606 .
     ?du obo:orthologous_to ?hu .
     ?du up:organism taxon:7227 .
 
@@ -917,10 +930,12 @@ def ibanez_fullseq_mir_homologs_rdf_path():
 
 
 def write_ibanez_5prime_mir_homologs_rdf():
+    print 'write_ibanez_5prime_mir_homologs_rdf'
     write_ibanez_method_mir_homologs_rdf(FIVE_PRIME, ibanez_5prime_mir_homologs_rdf_path())
 
 
 def write_ibanez_fullseq_mir_homologs_rdf():
+    print 'write_ibanez_fullseq_mir_homologs_rdf'
     write_ibanez_method_mir_homologs_rdf(SEVENTY_PERCENT, ibanez_fullseq_mir_homologs_rdf_path())
 
 
@@ -1070,6 +1085,7 @@ def write_roundup_orthologs_rdf():
     Note the loss of divergence, evalue, roundup version, and ortholog distance
     score.
     '''
+    print 'write_roundup_orthologs_rdf'
     # parameters
     version = '4'
     divergence = '0.8'
@@ -1125,6 +1141,7 @@ def download_mirbase_aliases():
 
 
 def write_mirbase_rdf():
+    print 'write_mirbase_rdf'
     graph = rdflib.Graph()
     human_accs = set()
     human_ids = set()
@@ -1188,6 +1205,390 @@ def write_mirbase_rdf():
 ###################
 # UNIPROT FUNCTIONS
 
+
+
+def get_uniprot_version_of_sparql_endpoint():
+    # Get the uniprot version.  Right now this is scraped from the html.
+    # I hope it will be a VoID property someday.
+    r = requests.get("http://beta.sparql.uniprot.org")
+    version = re.search(r"UniProt release (\d\d\d\d_\d\d)", r.text).group(1)
+    return version
+
+
+def uniprot_version_path():
+    '''
+    Where the "active" uniprot version/release is saved.  This tracks which
+    version of UniProt we have downloaded and generated RDF for.
+    '''
+    return os.path.join(config.datadir, 'uniprot', 'active_version.txt')
+
+
+def set_uniprot_version(version=None):
+    '''
+    version: if falsy, use the current version of the uniprot sparql endpoint.
+    '''
+    version = version or get_uniprot_version_of_sparql_endpoint()
+    fn = uniprot_version_path()
+    with open(fn, 'w') as fh:
+        fh.write(version + '\n')
+
+
+def get_uniprot_version():
+    fn = uniprot_version_path()
+    with open(fn) as fh:
+        return fh.read().strip()
+
+
+def uniprot_fly_rdf_path():
+    return os.path.join(uniprot_data_dir(get_uniprot_version()),
+                        'uniprot_fly.nt')
+
+
+def uniprot_homo_rdf_path():
+    return os.path.join(uniprot_data_dir(get_uniprot_version()),
+                        'uniprot_human.nt')
+
+
+def uniprot_flybase_annotation_rdf_path():
+    return os.path.join(uniprot_data_dir(get_uniprot_version()),
+                        'uniprot_flybase_annotation.nt')
+
+
+def uniprot_flybase_gene_rdf_path():
+    return os.path.join(uniprot_data_dir(get_uniprot_version()),
+                        'uniprot_flybase_gene.nt')
+
+
+def uniprot_flybase_transcript_rdf_path():
+    return os.path.join(uniprot_data_dir(get_uniprot_version()),
+                        'uniprot_flybase_transcript.nt')
+
+
+def uniprot_homo_refseq_rdf_path():
+    return os.path.join(uniprot_data_dir(get_uniprot_version()),
+                        'uniprot_homo_refseq.nt')
+
+
+def uniprot_homo_ensembl_gene_rdf_path():
+    return os.path.join(uniprot_data_dir(get_uniprot_version()),
+                        'uniprot_homo_ensembl_gene.nt')
+
+
+def uniprot_homo_ensembl_transcript_rdf_path():
+    return os.path.join(uniprot_data_dir(get_uniprot_version()),
+                        'uniprot_homo_ensembl_transcript.nt')
+
+
+def download_uniprot_fly_rdf():
+    # Construct triples for every fly uniprot entry.
+    # Say that they are proteins, from fly, and from uniprot.
+    qry = '''
+        PREFIX up:<http://purl.uniprot.org/core/> 
+        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
+        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
+        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
+        PREFIX bibo:<http://purl.org/ontology/bibo/> 
+        PREFIX dc:<http://purl.org/dc/terms/> 
+        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
+        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+        PREFIX db:<http://purl.uniprot.org/database/>
+        CONSTRUCT { 
+          ?protein a up:Protein .
+          ?protein up:organism taxon:7227 .
+          ?protein up:database <''' + uniprot_db + '''> .
+        }
+        WHERE {
+          ?protein a up:Protein .
+          ?protein up:organism taxon:7227 .
+        }
+    '''
+    fn = uniprot_fly_rdf_path()
+    count = download_uniprot_xrefs(qry, fn)
+    # As of 2013/07 there were 37828 fly uniprots.
+    if count < 30000 * 3:
+        raise Exception('Expected more triples.', count)
+
+
+def download_uniprot_homo_rdf():
+    # Construct triples for every homo uniprot entry.
+    # Say that they are proteins, from homo, and from uniprot.
+    qry = '''
+        PREFIX up:<http://purl.uniprot.org/core/> 
+        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
+        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
+        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
+        PREFIX bibo:<http://purl.org/ontology/bibo/> 
+        PREFIX dc:<http://purl.org/dc/terms/> 
+        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
+        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+        PREFIX db:<http://purl.uniprot.org/database/>
+        CONSTRUCT { 
+          ?protein a up:Protein .
+          ?protein up:organism taxon:9606 .
+          ?protein up:database <''' + uniprot_db + '''> .
+        }
+        WHERE {
+          ?protein a up:Protein .
+          ?protein up:organism taxon:9606 .
+        }
+    '''
+    fn = uniprot_homo_rdf_path()
+    count = download_uniprot_xrefs(qry, fn)
+    # As of 2013/07 there were 134288 homo uniprots.
+    if count < 130000 * 3:
+        raise Exception('Expected more triples.', count)
+
+
+def download_uniprot_flybase_annotation_rdf():
+    qry = '''
+        PREFIX up:<http://purl.uniprot.org/core/> 
+        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
+        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
+        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
+        PREFIX bibo:<http://purl.org/ontology/bibo/> 
+        PREFIX dc:<http://purl.org/dc/terms/> 
+        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
+        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+        PREFIX db:<http://purl.uniprot.org/database/>
+        CONSTRUCT { 
+          ?protein rdfs:seeAlso ?xref .
+          ?xref up:organism taxon:7227 .
+          ?xref up:database <''' + flybase_annotation_db + '''> .
+        }
+        WHERE {
+          ?protein a up:Protein .
+          ?protein up:organism taxon:7227 .
+          ?protein rdfs:seeAlso ?xref . 
+          ?xref up:database db:UCSC .
+        }
+    '''
+    fn = uniprot_flybase_annotation_rdf_path()
+    count = download_uniprot_xrefs(qry, fn)
+    # As of 2013/07 there were 14953 fly flybase annotations.
+    if count < 14000 * 3:
+        raise Exception('Expected more triples.', count)
+
+
+def download_uniprot_flybase_gene_rdf():
+    qry = '''
+        PREFIX up:<http://purl.uniprot.org/core/> 
+        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
+        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
+        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
+        PREFIX bibo:<http://purl.org/ontology/bibo/> 
+        PREFIX dc:<http://purl.org/dc/terms/> 
+        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
+        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+        PREFIX db:<http://purl.uniprot.org/database/>
+        CONSTRUCT { 
+          ?protein rdfs:seeAlso ?xref .
+          ?xref up:organism taxon:7227 .
+          ?xref up:database <''' + flybase_gene_db + '''> .
+        }
+        WHERE {
+          ?protein a up:Protein .
+          ?protein up:organism taxon:7227 .
+          ?protein rdfs:seeAlso ?xref .
+          ?xref up:database db:FlyBase .
+        }
+    '''
+    fn = uniprot_flybase_gene_rdf_path()
+    count = download_uniprot_xrefs(qry, fn)
+    # As of 2013/07 there were 23348 fly protein + flybase gene annotations.
+    # And 13k unique flybase genes in those annotation
+    # Wrote 50988 triples.
+    if count < 50000:
+        raise Exception('Expected more triples.', count)
+
+
+def download_uniprot_flybase_transcript_rdf():
+    # UniProt annotates proteins with flybase transcripts (FBtr* ids) using
+    # the database EnsemblMetazoa.
+    qry = '''
+        PREFIX up:<http://purl.uniprot.org/core/> 
+        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
+        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
+        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
+        PREFIX bibo:<http://purl.org/ontology/bibo/> 
+        PREFIX dc:<http://purl.org/dc/terms/> 
+        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
+        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+        PREFIX db:<http://purl.uniprot.org/database/>
+        CONSTRUCT { 
+          ?protein rdfs:seeAlso ?xref .
+          ?xref up:organism taxon:7227 .
+          ?xref up:database <''' + flybase_transcript_db + '''> .
+        }
+        WHERE {
+          ?protein a up:Protein .
+          ?protein up:organism taxon:7227 .
+          ?protein rdfs:seeAlso ?xref .
+          ?xref up:database db:EnsemblMetazoa .
+        }
+    '''
+    fn = uniprot_flybase_transcript_rdf_path()
+    count = download_uniprot_xrefs(qry, fn)
+    # As of 2013/07 there were 21819 fly flybase transcript annotations.
+    # Wrote 65457 triples.
+    if count < 60000:
+        raise Exception('Expected more triples.', count)
+
+
+def download_uniprot_homo_refseq_rdf():
+    # Construct human protein refseq annotation triples.
+    # The NP_* ids are URIs.  The NM_* ids are comment strings on the
+    # NP_* URIs.  Weird.  Also, strip the version number off the refseq ids,
+    # since the TargetScan transcript ids do not have the version number
+    # suffix.
+    qry = '''
+        PREFIX up:<http://purl.uniprot.org/core/> 
+        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
+        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
+        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
+        PREFIX bibo:<http://purl.org/ontology/bibo/> 
+        PREFIX dc:<http://purl.org/dc/terms/> 
+        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
+        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+        PREFIX db:<http://purl.uniprot.org/database/>
+        CONSTRUCT { 
+          ?protein rdfs:seeAlso ?xrefuri .
+          ?protein rdfs:seeAlso ?xref2uri .
+          ?xrefuri up:organism taxon:9606 .
+          ?xref2uri up:organism taxon:9606 .
+          ?xrefuri up:database <''' + refseq_db + '''> .
+          ?xref2uri up:database <''' + refseq_db + '''> .
+        }
+        WHERE {
+          ?protein a up:Protein .
+          ?protein up:organism taxon:9606 .
+          ?protein rdfs:seeAlso ?xref . 
+          ?xref up:database db:RefSeq .
+          ?xref rdfs:comment ?xref2 .
+          BIND (URI(REPLACE(str(?xref), 
+            '(\\\\d+)\\\\.\\\\d+$', '$1')) as ?xrefuri)
+          BIND (URI(CONCAT('http://purl.uniprot.org/refseq/', 
+            REPLACE(?xref2, '(\\\\d+)\\\\.\\\\d+$', '$1'))) as ?xref2uri)
+        }
+    '''
+    fn = uniprot_homo_refseq_rdf_path()
+    count = download_uniprot_xrefs(qry, fn)
+    # As of 2013/07 there were 83574 homo refseq annotation.
+    # Wrote 250652 triples.
+    if count < 80000 * 3:
+        raise Exception('Expected more triples.', count)
+
+
+def download_uniprot_homo_ensembl_transcript_rdf():
+    qry = '''
+        PREFIX up:<http://purl.uniprot.org/core/> 
+        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
+        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
+        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
+        PREFIX bibo:<http://purl.org/ontology/bibo/> 
+        PREFIX dc:<http://purl.org/dc/terms/> 
+        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
+        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+        PREFIX db:<http://purl.uniprot.org/database/>
+        CONSTRUCT { 
+          ?protein rdfs:seeAlso ?xref .
+          ?xref up:organism taxon:9606 .
+          ?xref up:database <''' + ensembl_transcript_db + '''> .
+        }
+        WHERE {
+          ?protein a up:Protein .
+          ?protein up:organism taxon:9606 .
+          ?protein rdfs:seeAlso ?xref . 
+          ?xref up:database db:Ensembl .
+          ?xref a up:Transcript_Resource .
+        }
+    '''
+    fn = uniprot_homo_ensembl_transcript_rdf_path()
+    count = download_uniprot_xrefs(qry, fn)
+    # As of 2013/07 there were 98088 homo ensembl transcript annotations.
+    # Wrote 294078 triples.
+    if count < 90000 * 3:
+        raise Exception('Expected more triples.', count)
+
+def download_uniprot_homo_ensembl_gene_rdf():
+    qry = '''
+        PREFIX up:<http://purl.uniprot.org/core/> 
+        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
+        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
+        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
+        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
+        PREFIX bibo:<http://purl.org/ontology/bibo/> 
+        PREFIX dc:<http://purl.org/dc/terms/> 
+        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
+        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+        PREFIX db:<http://purl.uniprot.org/database/>
+        CONSTRUCT { 
+          ?protein rdfs:seeAlso ?xref .
+          ?xref up:organism taxon:9606 .
+          ?xref up:database <''' + ensembl_gene_db + '''> .
+        }
+        WHERE {
+          ?protein a up:Protein .
+          ?protein up:organism taxon:9606 .
+          ?protein rdfs:seeAlso ?enst .
+          ?enst up:database db:Ensembl .
+          ?enst a up:Transcript_Resource .
+          ?enst up:transcribedFrom ?xref .
+        }
+    '''
+    fn = uniprot_homo_ensembl_gene_rdf_path()
+    count = download_uniprot_xrefs(qry, fn)
+    # As of 2013/07 there were 72427 homo ensembl gene annotations.
+    # Wrote 216873 triples.  Note that this is odd, b/c there are
+    # 71237 distinct pairs of ?protein and ?xref, and 22092 distinct
+    # ?xrefs in the query above.  So we would expect 71237 + 2 * 22092 triples
+    # (= 115421).  There are that many distinct triples, so the construct
+    # query returned non-distinct triples.  Weird.
+    if count < 70000 * 3:
+        raise Exception('Expected more triples.', count)
+
+
+def download_uniprot_xrefs(qry, filename, validate=None):
+    '''
+    Return the count of lines (triples) returned from the query.
+    qry: a SPARQL construct query.
+    filename: where to save the constructed triples (as N-Triples).
+    validate: a function to validate each line.
+    '''
+    if validate == None:
+        def validate(line):
+            pass
+    version = get_uniprot_version_of_sparql_endpoint()
+    print 'Downloading Xrefs for UniProt version:', version
+    print 'Query:', qry
+    sp = sparql.Sparql('http://beta.sparql.uniprot.org')
+    try:
+        # Use text/plain for N-triples
+        nt = sp.query(qry, accept='text/plain')
+    except Exception as e:
+        print dir(e)
+        print e.response.text
+        print e.response.headers
+        raise
+
+    print 'Writing triples to file:', filename
+    count = 0
+    with open(filename, 'w') as fh:
+        for line in StringIO.StringIO(nt):
+            count += 1
+            validate(line)
+            fh.write(line)
+
+    print 'Wrote {} triples.'.format(count)
+    return count
+
+
 def download_uniprot_idmapping():
     raise NotImplementedError('''
 The idmapping file can only be downloaded for the current uniprot release.
@@ -1203,6 +1604,7 @@ from the uniprot sparql endpoint, http://beta.sparql.uniprot.org/.
 def write_uniprot_rdf():
     '''
     '''
+    print 'write_uniprot_rdf'
     # id dbs, id kind, uniprot id mapping file
     # mrna refseq ids (targetscan) (human) YES, idmapping.RefSeq_NT.dat (but need to strip version off the end)
     # flybase annotation ids (microcosm, flybase) (fly) YES/MAYBE, idmapping.UCSC.dat
@@ -1259,13 +1661,17 @@ def write_uniprot_rdf():
         outfh.write(graph.serialize(format='nt'))
 
 
+def uniprot_data_dir(version):
+    return makedirs(os.path.join(config.datadir, 'uniprot', version))
+
+
 def uniprot_rdf_path(version='2013_04'):
-    return os.path.join(config.datadir, 'uniprot', version,
+    return os.path.join(uniprot_data_dir(version),
                         'uniprot-{}-idmapping.nt'.format(version))
 
 
 def uniprot_idmapping_path(version='2013_04', id_type=None):
-    d = os.path.join(config.datadir, 'uniprot', version)
+    d = uniprot_data_dir(version)
     if id_type is None:
         return os.path.join(d, 'idmapping.dat')
     else:
@@ -1382,8 +1788,9 @@ def write_mcneill_muscle_screen_rdf():
     Write an rdf file for muscle tissue results from Elizabeth McNeill's
     expression array screen of 7 fly miRs.
     '''
+    print 'write_mcneill_muscle_screen_rdf'
     write_mcneill_tissue_screen_rdf(muscle_tissue,
-                                    mcneill_muscle_screen_rdf_path)
+                                    mcneill_muscle_screen_rdf_path())
 
 
 def write_mcneill_cns_screen_rdf():
@@ -1391,8 +1798,9 @@ def write_mcneill_cns_screen_rdf():
     Write an rdf file for CNS tissue results from Elizabeth McNeill's
     expression array screen of 7 fly miRs.
     '''
-    write_mcneill_tissue_screen_rdf(muscle_tissue,
-                                    mcneill_muscle_screen_rdf_path)
+    print 'write_mcneill_cns_screen_rdf'
+    write_mcneill_tissue_screen_rdf(cns_tissue,
+                                    mcneill_cns_screen_rdf_path())
 
 
 def write_mcneill_tissue_screen_rdf(tissue, filename):
@@ -1440,6 +1848,7 @@ def affymetrix_fly_annotations_rdf_path():
 
 
 def write_affymetrix_fly_annotations_rdf():
+    print 'write_affymetrix_fly_annotations_rdf'
     graph = rdflib.Graph()
     fly_genes = set()
     for probeset_id, gene_id in gen_affymetrix_fly_probe_to_flybase_mapping():
@@ -1542,6 +1951,7 @@ def microcosm_rdf_path():
 
 
 def write_microcosm_rdf():
+    print 'write_microcosm_rdf'
     graph = rdflib.Graph()
     fly_mirs = set()
     fly_anno_ids = set()
@@ -1833,6 +2243,7 @@ def targetscan_fly_symbol_to_gene():
 
 
 def write_targetscan_rdf():
+    print 'write_targetscan_rdf'
     graph = rdflib.Graph()
     families = set()
     fly_mirbase_accs = set()
@@ -2068,6 +2479,7 @@ def gen_flybase_transcript_to_annotation_mapping(version='FB2013_02'):
 def write_flybase_rdf():
     '''
     '''
+    print 'write_flybase_rdf'
     graph = rdflib.Graph()
     for taxon, trans_id, anno_id in gen_flybase_transcript_mapping_file():
         transcript = flybase_transcript_iri(trans_id)
@@ -2273,6 +2685,7 @@ def synaptomedb_v1_rdf_path():
 
 
 def write_synaptomedb_rdf():
+    print 'write_synaptomedb_rdf'
     graph = rdflib.Graph()
 
     # describe the IRIs as human, synaptic, ensembl gene
@@ -2305,6 +2718,19 @@ def parse_synaptomedb_all_genes(filename=None):
     if filename is None:
         filename = synaptomedb_v1_all_genes_file()
 
+    # These are the fields of the csv file
+    headers = ["gid", "gene_symbol", "gene_synonyms", "gene_info", "chr",
+               "start", "end", "hgnc", "pdb", "ipi", "unigene", "bp", "mf",
+               "cc", "ensembl_gene_id", "ensembl_trans_id", "ensembl_pro_id",
+               "interpro_id", "pfam_id", "pir_id", "pirsf_id", "ccds_id",
+               "nuc_acc", "pro_acc", "nuc_gi", "pro_gi", "homo_id",
+               "homo_gene_id", "homo_ens_gene_id", "homo_pro_id", "pubmed",
+               "omim", "path_kegg", "path_biocarta", "path_reactome",
+               "path_ecnumber", "path_gsea", "path_hprd", "ref_gen_acc",
+               "ref_mrna_acc", "ref_pro_acc", "ref_gen_gi", "ref_nuc_gi",
+               "ref_pro_gi"]
+    Fields = collections.namedtuple('Fields', headers)
+
     genes = []
     with open(filename) as fh:
         reader = csv.reader(fh)
@@ -2312,16 +2738,15 @@ def parse_synaptomedb_all_genes(filename=None):
             # row 0 is a header row
             if i < 1:
                 continue
-
-            gid = row['gid']
-            gene_symbol = row['gene_symbol']
-            gene_info = row['gene_info']
-            ensembl_gene_ids = row['ensembl_gene_id'].split('; ') if row['ensembl_gene_id'] else []
-            ensembl_trans_ids = row['ensembl_trans_id'].split('; ') if row['ensembl_trans_id'] else []
+            row = Fields(*row) # look up values using named attributes
+            gid = row.gid
+            gene_symbol = row.gene_symbol
+            gene_info = row.gene_info
+            ensembl_gene_ids = row.ensembl_gene_id.split('; ') if row.ensembl_gene_id else []
+            ensembl_trans_ids = row.ensembl_trans_id.split('; ') if row.ensembl_trans_id else []
             genes.append({'gid': gid, 'gene_symbol': gene_symbol,  'gene_info':
                           gene_info,  'ensembl_gene_ids': ensembl_gene_ids,
                           'ensembl_trans_ids': ensembl_trans_ids})
-
     return genes
 
 
@@ -2544,10 +2969,10 @@ def workflow():
     if False: # Done tasks
         pass
 
-        # download_microcosm_targets()
-        # download_minotar()
-        # download_mirbase_aliases()
-        # download_targetscan()
+        download_microcosm_targets()
+        download_minotar()
+        download_mirbase_aliases()
+        download_targetscan()
         # Not Implemented b/c not available online or not available anymore for
         # the version we want (uniprot 2013_04) or just not done yet (Roundup,
         # Flybase)
@@ -2557,8 +2982,6 @@ def workflow():
         # download_roundup_orthologs()
         # download_synaptome_v1()
         # download_flybase_transcript_reporting_xml()
-
-    else:
 
         write_affymetrix_fly_annotations_rdf()
         write_flybase_rdf()
@@ -2571,20 +2994,36 @@ def workflow():
         write_roundup_orthologs_rdf()
         write_synaptomedb_rdf()
         write_targetscan_rdf()
-        write_uniprot_rdf()
 
-        load_affymetrix_fly_annotations_rdf()
-        load_flybase_rdf()
-        load_ibanez_5prime_mir_homologs_rdf()
-        load_ibanez_fullseq_mir_homologs_rdf()
-        load_mcneill_cns_screen_rdf()
-        load_mcneill_muscle_screen_rdf()
-        load_microcosm_rdf()
-        load_mirbase_rdf()
-        load_roundup_orthologs_rdf()
-        load_synaptomedb_rdf()
-        load_targetscan_rdf()
-        load_uniprot_rdf()
+        # Get UniProt ID Mapping RDF from beta.sparql.uniprot.org.
+        set_uniprot_version()
+        download_uniprot_fly_rdf()
+        download_uniprot_homo_rdf()
+        download_uniprot_flybase_annotation_rdf()
+        download_uniprot_flybase_gene_rdf()
+        download_uniprot_flybase_transcript_rdf()
+        download_uniprot_homo_refseq_rdf()
+        download_uniprot_homo_ensembl_transcript_rdf()
+        download_uniprot_homo_ensembl_gene_rdf()
+        # Or get UniProt ID Mapping RDF from idmapping.dat (UniProt ftp file.)
+        # write_uniprot_rdf()
+
+        load_virtuoso_database()
+    else:
+
+        # download_uniprot_xrefs()
+        # load_affymetrix_fly_annotations_rdf()
+        # load_flybase_rdf()
+        # load_ibanez_5prime_mir_homologs_rdf()
+        # load_ibanez_fullseq_mir_homologs_rdf()
+        # load_mcneill_cns_screen_rdf()
+        # load_mcneill_muscle_screen_rdf()
+        # load_microcosm_rdf()
+        # load_mirbase_rdf()
+        # load_roundup_orthologs_rdf()
+        # load_synaptomedb_rdf()
+        # load_targetscan_rdf()
+        # load_uniprot_rdf()
 
 
 
@@ -2676,5 +3115,7 @@ def make_ibanez_mir_homologs_method_graph(method, graph):
     for mir in human_mirs:
         graph.add((mir, db_pred, mirbase_id_db))
         graph.add((mir, organism_pred, homo_iri))
+
+
 
 

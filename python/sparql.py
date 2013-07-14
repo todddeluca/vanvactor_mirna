@@ -113,6 +113,6 @@ class Sparql:
         Therefore, the best we can do is test if the graph is empty or not.
         '''
         qry = 'ASK {{ GRAPH <{graph}> {{ }} }}'.format(graph=graph)
-        print(self.ask(qry))
+        return self.ask(qry)
 
 
