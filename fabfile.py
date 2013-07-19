@@ -23,12 +23,23 @@ Example of running code:
 from __future__ import print_function
 import StringIO
 import os
+import sys
 
-from fabric.api import env, execute, put, require, run, task
-
-import fabvenv
+from fabric.api import env, execute, put, require, run, sudo, task, get
+import fabric.contrib.files
 
 HERE = os.path.abspath(os.path.dirname(__file__))
+
+import fabvenv
+sys.path.append(os.path.join(HERE, 'secrets'))
+import prod as secrets
+
+
+
+# Stardog database data and license key live in STARDOG_HOME
+stardog_version = '1.2.3'
+stardog_name = 'stardog-{}'.format(stardog_version)
+stardog_home = '/home/ubuntu/data/stardog'
 
 
 ###############
@@ -131,6 +142,70 @@ def venv_pth():
     fabvenv.Venv(config.venv, config.requirements).venv_pth([config.code])
 
 
+###################
+# HOST SERVER TASKS
+# Installing, configuring, starting, and stopping servers on a host
+
+@task
+def install_stardog():
+    '''
+    '''
+    # STARDOG_HOME tells stardog where its data files, etc., are.
+    fabric.contrib.files.append(
+        '~/.bash_profile', 'export STARDOG_HOME="{}"'.format(stardog_home))
+
+    sd = stardog_name
+
+    # Upload and unzip stardog archive
+    sudo('rm -rf ~/{sd}'.format(sd=sd))
+    put('installs/{sd}/{sd}.zip'.format(sd=sd), '~')
+    run('unzip {sd}.zip'.format(sd=sd))
+
+    # Move stardog dir to /usr/local and link executables to /usr/local/bin
+    # so they are on PATH
+    uninstall_stardog()
+    sudo('mv ~/{sd} /usr/local'.format(sd=sd))
+    sudo('ln -s /usr/local/{sd}/stardog /usr/local/{sd}/stardog-admin /usr/local/bin'.format(sd=sd))
+
+    # Create STARDOG_HOME dir for stardog data
+    run('mkdir -p {}'.format(stardog_home))
+    # Add license key to STARDOG_HOME so stardog will work.
+    put('installs/{sd}/stardog-license-key.bin'.format(sd=sd), stardog_home)
+
+    # Change default password for default admin user to something not published
+    # on the web
+    # This starts stardog as a background process, changes the password, then
+    # stops stardog (using then new password).  All of this needs to be done
+    # in the same run command (except the stop?) b/c stardog starts as a 
+    # background process which dies when the run command ends.
+    run('''stardog-admin server start --username admin --passwd admin && \\
+           stardog-admin user passwd --username admin --passwd admin \\
+           --new-password {password} && \\
+           stardog-admin server stop --username admin --passwd {password} \\
+        '''.format(password=secrets.stardog_admin_password))
+
+@task
+def conf_stardog():
+    put(os.path.join(HERE, 'conf', stardog_name, 'stardog.properties'),
+        stardog_home)
+
+@task
+def uninstall_stardog():
+    '''
+    Remove stardog binaries, leaving stardog data files intact.
+    '''
+    sudo('rm -rf /usr/local/{sd}'.format(sd=stardog_name))
+    sudo('rm -f /usr/local/bin/stardog /usr/local/bin/stardog-admin')
+
+@task
+def uninstall_stardog_home():
+    '''
+    Remove STARDOG_HOME dir, including all stardog database files!
+    '''
+    sudo('rm -rf {}'.format(stardog_home))
+
+
+
 ##########################
 # RELEASE DEPLOYMENT TASKS
 
@@ -176,6 +251,12 @@ def deploy():
 
 #########################################
 # CONVENIENCE TASKS FOR DOING MANY THINGS
+
+
+@task()
+def copy_results_to_dropbox(results_dir):
+    get(os.path.join(config.data, results_dir),
+        os.path.expanduser('~/Dropbox/MIRConservation'))
 
 
 @task

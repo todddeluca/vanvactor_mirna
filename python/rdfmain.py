@@ -16,6 +16,9 @@ import subprocess
 import urllib
 import xml.etree.cElementTree as elementtree
 import StringIO
+import sys
+import datetime
+import functools
 
 import rdflib
 import requests
@@ -27,11 +30,15 @@ import virtuoso
 # import stardog
 import sparql
 
-
+VIRT7_DB = 'virt7'
+STARDOG_DB = 'stardog'
+# DB_TYPE = VIRT7_DB
+DB_TYPE = STARDOG_DB
 virt7 = virtuoso.Virtuoso7(secrets.virtuoso_dba_password,
                            config.virtuoso_load_dir)
 sparq = sparql.Sparql(virt7.sparql_endpoint()) # used for querying
 
+uniprot_sparql_url = 'http://beta.sparql.uniprot.org'
 
 # RDF URIs and URI generators
 # Real Entities
@@ -152,6 +159,11 @@ dro = 'drosophila_melanogaster'
 cel = 'caenorhabditis_elegans'
 homo = 'homo_sapiens'
 
+# mirna target prediction databases
+MICROCOSM = 'microcosm'
+TARGETSCAN = 'targetscan'
+
+
 # ncbi taxon ids for species
 mus_taxon = '10090'
 dro_taxon = '7227'
@@ -193,8 +205,12 @@ validated_mirs = [
     u'dme-miR-982-5p', u'dme-miR-999-3p', u'dme-miR-1014-3p']
 
 # The two methods used to assess homology in the 2008 Ibanez-Ventoso paper.
-FIVE_PRIME = '5_prime_sequence_homolog'
-SEVENTY_PERCENT = '70_percent_full_sequence_homolog'
+FIVE_PRIME = '5_prime'
+SEVENTY_PERCENT = '70_percent_full_sequence'
+IBANEZ_METHOD_TO_NG = {FIVE_PRIME: ibanez_five_prime_ng,
+                          SEVENTY_PERCENT: ibanez_full_sequence_ng,
+                         }
+
 
 # taxons and pairs used for roundup orthologs
 taxmap = {dro: '7227', homo: '9606', mus: '10090', cel: '6239'}
@@ -205,6 +221,19 @@ ROUNDUP_PAIRS = [(dro_taxon, homo_taxon), (mus_taxon, homo_taxon), (cel_taxon, h
 
 ###########################
 # GENERAL UTILITY FUNCTIONS
+
+
+def map_flatten_set_list(func, items):
+    '''
+    Run a function, one that returns a sequence, on each element of items.
+    Flatten the sequences into a single list, and return a list of the
+    unique items.
+    Example: 
+        >>> map_flatten_set_list(lambda x: (x, x+1), [1, 2, 4])
+        [1, 2, 3, 4, 5]
+    '''
+    return list(set(i for lst in [func(i) for i in items] for i in lst))
+
 
 def example(message):
 
@@ -228,6 +257,7 @@ def makefiledirs(path, mode=0775):
     '''
     makedirs(os.path.dirname(path), mode=mode)
     return path
+
 
 def makedirs(path, mode=0775):
     '''
@@ -267,10 +297,130 @@ def download_and_unzip(url, dest_dir):
 # RDF GRAPH DATABASE FUNCTIONS
 
 
-def sparql_json_query(query):
-    print 'sparql_json_query'
+def stop_stardog():
+    user = secrets.stardog_admin_user
+    password = secrets.stardog_admin_password
+    print 'To stop stardog, run the following command:'
+    print 'stardog-admin server stop --username {} --passwd {}'.format(user, password)
+
+
+def start_stardog():
+    # In order to use Stardog in federated queries, the authentication needs to
+    # be disabled for the default anonymous user.
+    # http://www.stardog.com/docs/faq/.
+    # Disable authentication for the `anonymous` user
+    user = secrets.stardog_admin_user
+    password = secrets.stardog_admin_password
+    print 'To start stardog, run the following command:'
+    print 'stardog-admin --disable-security server start --username {} --passwd {}'.format(user, password)
+
+
+def download_sparql_ntriples(qry, endpoint):
+    ''' 
+    Download triples from a sparql endpoint and return them as N-triples.
+
+    :param qry: a SPARQL Construct query.
+    :type qry: str.
+    :param endpoint: a SPARQL endpoint URL.
+    :type endpoint: str.
+    '''
+    print 'Downloading triples from endpoint: {}'.format(endpoint)
+    print 'Query:', qry
+    sp = sparql.Sparql(endpoint)
+    try:
+        # Use text/plain for N-triples
+        nt = sp.query(qry, accept='text/plain')
+    except Exception as e:
+        print dir(e)
+        print e.response.text
+        print e.response.headers
+        raise
+    return nt
+
+
+def count_and_write_ntriples(nt, filename):
+    '''
+    :param nt: N-triples, one per line.
+    :type nt: str
+    '''
+    print 'Writing triples to file:', filename
+    count = 0
+    with open(filename, 'w') as fh:
+        for line in StringIO.StringIO(nt):
+            if line.strip():
+                count += 1
+                fh.write(line)
+
+    print 'Wrote {} triples.'.format(count)
+    return count
+
+
+def download_sparql_construct_rdf(qry, filename, endpoint):
+    '''
+    Run qry, a SPARQL query, on endpoint, a SPARQL endpoint, and save
+    the constructed triples to a file as N-Triples.  Return the count of lines
+    (triples) returned from the query.
+
+    qry: a SPARQL Construct query.
+    filename: where to save the constructed triples (as N-Triples).
+    endpoint: a sparql endpoint url
+    '''
+    nt = download_sparql_ntriples(qry, endpoint)
+    count = count_and_write_ntriples(nt, filename)
+    return count
+
+
+def stardog_json_query(query):
+    db_name = stardog_database_name()
+    # Include reasoning if inferring symmetrical edges.  Avoid it if
+    # symmetrical ortholog edges were loaded.
+    # db_name = '{};reasoning=QL'.format(stardog_database_name()),
+
+    cmd = ['stardog', 'query', 'execute', '--username', secrets.stardog_user,
+           '--passwd', secrets.stardog_password, '--format', 'JSON', db_name,
+           query]
+    print 'stardog_json_query()'
+    print query
+    out = subprocess.check_output(cmd)
+    try:
+        data = json.loads(out)
+    except ValueError:
+        sys.stdout.write(out)
+        raise
+    return data
+
+
+def virtuoso_json_query(query):
+    print 'virtuoso_json_query'
     print query
     return sparq.query(query, accept='application/sparql-results+json')
+
+
+def sparql_json_query(query):
+    if DB_TYPE == VIRT7_DB:
+        return virtuoso_json_query(query)
+    elif DB_TYPE == STARDOG_DB:
+        return stardog_json_query(query)
+    else:
+        raise Exception('Unrecognized DB_TYPE', DB_TYPE)
+
+
+def query_for_id_tuples(query, bindings):
+    '''
+    Make a sparql query, parse out the bindings (with no type conversion) from
+    the results for the given bindings.  The binding values should be IRIs of
+    the form "http://example.com/path/to/id".  Return a list of tuples of ids
+    (not IRIs), where the ids are ordered according to `bindings`.
+    '''
+    result = sparql_json_query(query)
+    # IRIs are like u'http://purl.targetscan.org/mir_family/miR-33'
+    # or u'http://purl.targetscan.org/mir_family/miR-279%2F286%2F996'
+    id_tuples = []
+    for row in result['results']['bindings']:
+        iris = [row[binding]['value'] for binding in bindings]
+        ids = tuple(iri_to_id(iri) for iri in iris)
+        id_tuples.append(ids)
+    return id_tuples
 
 
 def query_for_ids(query, binding):
@@ -296,7 +446,18 @@ def iris_to_ids(iris, token='/'):
     token: a character (or string) to split the identifier from the rest of
     the IRI.  In RDF, it is typically a slash ('/') or a hash ('#').
     '''
-    return [urllib.unquote(iri.rsplit(token, 1)[-1]) for iri in iris]
+    return [iri_to_id(iri, token) for iri in iris]
+
+def iri_to_id(iri, token='/'):
+    '''
+    Convert a URIs/IRIs into a plain old identifier.  The id are also
+    URL unquoted, which should be safe, considering that, as IRIs, they should
+    be quoted, right?  Or is that just a URL thing?
+    iri: str.  An IRI in the form: 'http://example.com/path/to/identifier'
+    token: a character (or string) to split the identifier from the rest of
+    the IRI.  In RDF, it is typically a slash ('/') or a hash ('#').
+    '''
+    return urllib.unquote(iri.rsplit(token, 1)[-1])
 
 
 def prefixes():
@@ -319,14 +480,16 @@ def prefixes():
 
 
 def stardog_database_name():
-
+    '''
+    The name of the database for the vanvactor mirna collaboration
+    '''
     return 'mirna'
 
 
 def drop_stardog_database():
-    cmd = 'time stardog-admin db drop --username {} --passwd {}'.format(
-        secrets.stardog_admin_user, secrets.stardog_admin_password)
-    cmd += ' ' + stardog_database_name()
+    cmd = 'time stardog-admin db drop --username {} --passwd {} {}'.format(
+        secrets.stardog_admin_user, secrets.stardog_admin_password,
+        stardog_database_name())
     call(cmd)
 
 
@@ -335,11 +498,54 @@ def load_stardog_database():
     Data is loaded when the database is created b/c loading is much faster
     that way, according to the stardog docs.
     '''
-    rdf_paths = all_rdf_paths()
     cmd = 'time stardog-admin db create --username {} --passwd {}'.format(
         secrets.stardog_admin_user, secrets.stardog_admin_password)
-    cmd += ' --name {} {}'.format(stardog_database_name(), ' '.join(rdf_paths))
+    cmd += ' --name {}'.format(stardog_database_name())
+    # quickly bulk load data at database creation time
+    # cmd += ' ' + ' '.join(all_rdf_paths())
     call(cmd)
+
+    for filename, graph in all_rdf_files_and_graphs():
+        cmd = 'time stardog data add --username {} --passwd {}'.format(
+            secrets.stardog_admin_user, secrets.stardog_admin_password)
+        cmd += ' --named-graph {} {} {}'.format(
+            graph, stardog_database_name(), filename)
+        call(cmd)
+
+
+def stardog_default_graph_rdf_files_and_graphs():
+    return [
+        (affymetrix_fly_annotations_rdf_path(), affymetrix_ng),
+        (flybase_rdf_path(), flybase_ng),
+        (microcosm_rdf_path(), microcosm_ng),
+        (mirbase_rdf_path(), mirbase_ng),
+        (synaptomedb_v1_rdf_path(), synaptomedb_ng),
+        (targetscan_rdf_path(), targetscan_ng),
+        # UniProt from the idmapping.dat file
+        # (uniprot_rdf_path(), uniprot_ng),
+        # UniProt from beta.sparql.uniprot.org
+        (uniprot_homo_ensembl_gene_rdf_path(), uniprot_ng),
+        (uniprot_homo_ensembl_transcript_rdf_path(), uniprot_ng),
+        (uniprot_homo_refseq_rdf_path(), uniprot_ng),
+        (uniprot_flybase_transcript_rdf_path(), uniprot_ng),
+        (uniprot_flybase_gene_rdf_path(), uniprot_ng),
+        (uniprot_flybase_annotation_rdf_path(), uniprot_ng),
+        (uniprot_homo_rdf_path(), uniprot_ng),
+        (uniprot_fly_rdf_path(), uniprot_ng),
+        # Roundup from the downloaded txt files
+        (roundup_rdf_path(), roundup_ng),
+        # Roundup from sparql.roundup.hms.harvard.edu
+        (roundup_sparql_rdf_path(), roundup_ng),
+    ]
+
+
+def stardog_named_graph_rdf_files_and_graphs():
+    return [
+        (ibanez_5prime_mir_homologs_rdf_path(), ibanez_five_prime_ng),
+        (ibanez_fullseq_mir_homologs_rdf_path(), ibanez_full_sequence_ng),
+        (mcneill_cns_screen_rdf_path(), mcneill_cns_ng),
+        (mcneill_muscle_screen_rdf_path(), mcneill_muscle_ng),
+    ]
 
 
 def all_rdf_files_and_graphs():
@@ -352,10 +558,23 @@ def all_rdf_files_and_graphs():
         (mcneill_muscle_screen_rdf_path(), mcneill_muscle_ng),
         (microcosm_rdf_path(), microcosm_ng),
         (mirbase_rdf_path(), mirbase_ng),
-        (roundup_rdf_path(), roundup_ng),
         (synaptomedb_v1_rdf_path(), synaptomedb_ng),
         (targetscan_rdf_path(), targetscan_ng),
-        (uniprot_rdf_path(), uniprot_ng),
+        # UniProt from the idmapping.dat file
+        # (uniprot_rdf_path(), uniprot_ng),
+        # UniProt from beta.sparql.uniprot.org
+        (uniprot_homo_ensembl_gene_rdf_path(), uniprot_ng),
+        (uniprot_homo_ensembl_transcript_rdf_path(), uniprot_ng),
+        (uniprot_homo_refseq_rdf_path(), uniprot_ng),
+        (uniprot_flybase_transcript_rdf_path(), uniprot_ng),
+        (uniprot_flybase_gene_rdf_path(), uniprot_ng),
+        (uniprot_flybase_annotation_rdf_path(), uniprot_ng),
+        (uniprot_homo_rdf_path(), uniprot_ng),
+        (uniprot_fly_rdf_path(), uniprot_ng),
+        # Roundup from the downloaded txt files
+        (roundup_rdf_path(), roundup_ng),
+        # Roundup from sparql.roundup.hms.harvard.edu
+        (roundup_sparql_rdf_path(), roundup_ng),
     ]
 
 
@@ -366,12 +585,20 @@ def all_rdf_paths():
 def load_virtuoso_database():
     for filename, graph in all_rdf_files_and_graphs():
         # drop any existing graph
-        if sparq.exists_graph(graph):
-            print 'dropping graph {}'.format(graph)
-            sparq.drop_graph(graph)
+        virt7.drop_graph(graph, silent=True)
         # load files into graph, one at a time
         print 'loading graph {}'.format(graph)
         virt7.load_graph(graph, filename)
+
+
+def load_rdf_database():
+    if DB_TYPE == VIRT7_DB:
+        load_virtuoso_database()
+    elif DB_TYPE == STARDOG_DB:
+        drop_stardog_database()
+        load_stardog_database()
+    else:
+        raise Exception('Unrecognized DB_TYPE', DB_TYPE)
 
 
 ################
@@ -415,6 +642,10 @@ def update_mirbase_ids(mirbase_ids):
 
 
 def update_validated_mirs_to_current_mirbase_ids():
+    '''
+    Used to update a list of mirs from Elizabeth to their current mirbase ids,
+    so they can be more easily used in the database queries
+    '''
     lookup = update_mirbase_ids(original_validated_mirs)
     for mir in original_validated_mirs:
         print mir, lookup.get(mir)
@@ -425,7 +656,99 @@ def update_validated_mirs_to_current_mirbase_ids():
     return current_mirs
 
 
+def human_to_fly_conserved_synapse_genes_table():
+    '''
+    Return a list of tuples of human ensembl gene and flybase gene.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?heg ?fbg
+    WHERE {
+    # human synaptic ensembl genes
+    ?heg up:classifiedWith syndb:synaptic .
+    ?heg up:organism taxon:9606 .
+    ?heg up:database db:ensembl_gene .
+    ?hu rdfs:seeAlso ?heg .
+
+    # human - fly orthologs
+    ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
+    ?du obo:orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
+
+    # flybase genes
+    ?du rdfs:seeAlso ?fbg .
+    ?fbg up:database db:flybase_gene .
+    }
+    '''
+    return query_for_id_tuples(query, ['heg', 'fbg'])
+
+
+def human_conserved_synapse_genes():
+    '''
+    Synapse genes are human genes from SynapseDB.
+    Conserved synapse genes are the subset that have fly orthologs.
+    Return a list of human ensembl synaptic genes with fly orthologs.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?heg
+    WHERE {
+    # human synaptic ensembl genes
+    ?heg up:classifiedWith syndb:synaptic .
+    ?heg up:organism taxon:9606 .
+    ?heg up:database db:ensembl_gene .
+    ?hu rdfs:seeAlso ?heg .
+
+    # human - fly orthologs
+    ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
+    ?du obo:orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
+
+    # flybase genes
+    ?du rdfs:seeAlso ?dg .
+    ?dg up:database db:flybase_gene .
+    }
+    '''
+    return query_for_ids(query, 'heg')
+
+def fly_conserved_synapse_genes():
+    '''
+    Synapse genes are human genes from SynapseDB.
+    Conserved synapse genes are the subset that have fly orthologs.
+    Return a list of fly genes that are orthologous to human synaptic genes.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?dg
+    WHERE {
+    # human synaptic ensembl genes
+    ?heg up:classifiedWith syndb:synaptic .
+    ?heg up:organism taxon:9606 .
+    ?heg up:database db:ensembl_gene .
+    ?hu rdfs:seeAlso ?heg .
+
+    # human - fly orthologs
+    ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
+    ?du obo:orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
+
+    # flybase genes
+    ?du rdfs:seeAlso ?dg .
+    ?dg up:database db:flybase_gene .
+    }
+    '''
+    return query_for_ids(query, 'dg')
+
 def targetscan_human_mirs_targeting_conserved_synapse_genes():
+    '''
+    Synapse genes are human genes from SynapseDB.
+    Conserved synapse genes are the subset that have fly orthologs.
+    Return the human mirs predicted by targetscan to target one or more of
+    the conserved synapse genes.
+    '''
     query = prefixes() + '''
     SELECT DISTINCT ?hm
     WHERE {
@@ -436,8 +759,10 @@ def targetscan_human_mirs_targeting_conserved_synapse_genes():
 
     # human - fly orthologs
     ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
     ?du obo:orthologous_to ?hu .
     ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
 
     # human refseq transcripts
     ?hu rdfs:seeAlso ?ht .
@@ -462,6 +787,12 @@ def targetscan_human_mirs_targeting_conserved_synapse_genes():
 
 def targetscan_fly_mirs_targeting_conserved_synapse_genes():
     '''
+    Synapse genes are human genes from SynapseDB.
+    Conserved synapse genes are the subset that have fly orthologs.
+    Return the fly mirs that map to targetscan mir families predicted by
+    targetscan to target one or more of fly orthologs of the conserved synapse
+    genes.
+
     fly targetscan family targeting flybase gene linked to uniprot orthologous
     to human uniprot linked to human ensembl gene classified with synaptic.
     '''
@@ -476,8 +807,10 @@ def targetscan_fly_mirs_targeting_conserved_synapse_genes():
 
     # human - fly orthologs
     ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
     ?du obo:orthologous_to ?hu .
     ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
 
     # fly genes
     ?du rdfs:seeAlso ?dg .
@@ -514,8 +847,10 @@ def microcosm_human_mirs_targeting_conserved_synapse_genes():
 
     # human - fly orthologs
     ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
     ?du obo:orthologous_to ?hu .
     ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
 
     # human ensembl transcripts
     ?hu rdfs:seeAlso ?ht .
@@ -555,8 +890,10 @@ def microcosm_fly_mirs_targeting_conserved_synapse_genes():
 
     # human - fly orthologs
     ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
     ?du obo:orthologous_to ?hu .
     ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
 
     # fly transcrips
     ?du rdfs:seeAlso ?dt .
@@ -582,7 +919,7 @@ def microcosm_fly_mirs_targeting_conserved_synapse_genes():
     return query_for_ids(query, 'dm')
 
 
-def mircocosm_predicted_human_mir_targets(mirbase_id):
+def microcosm_predicted_human_mir_targets(mirbase_id):
     '''
     Given a mirbase id, go to mature mirbase accession, to mirbase ids
     associated with that accession, to ensembl transcript targets to uniprot
@@ -618,7 +955,7 @@ def mircocosm_predicted_human_mir_targets(mirbase_id):
     return query_for_ids(query, 'gene')
 
 
-def mircocosm_predicted_fly_mir_targets(mirbase_id):
+def microcosm_predicted_fly_mir_targets(mirbase_id):
     '''
     Given a mirbase id, go to a mature mirbase accession and back to mirbase
     ids (since we are not sure if the input mirbase_id is the same as one of
@@ -661,8 +998,8 @@ def mircocosm_predicted_fly_mir_targets(mirbase_id):
 
 def targetscan_predicted_human_mir_targets(mirbase_id):
     '''
-    Given a mirbase id, go to a mature mirbase accession, to a targetscan mir family,
-    to predicted targeted refseq to uniprot to ensembl gene.
+    Given a mirbase id, go to a mature mirbase accession, to a targetscan mir
+    family, to predicted targeted refseq to uniprot to ensembl gene.
     '''
     mir = mirbase_id_iri(mirbase_id)
     query = prefixes() + '''
@@ -719,6 +1056,218 @@ def targetscan_predicted_fly_mir_targets(mirbase_id):
     }}
     '''.format(mid_orig=mir)
     return query_for_ids(query, 'gene')
+
+
+def human_homologs_of_fly_mir(mirbase_id, ibanez_method=FIVE_PRIME):
+    mir = mirbase_id_iri(mirbase_id)
+    query = prefixes() + '''
+    SELECT DISTINCT ?hmid
+    WHERE {{
+    # original mirbase id to mature mirbase accession
+    ?macc mb:has_id <{mid_orig}> .
+    ?macc a mb:mature_mirna .
+    ?macc up:database db:mirbase_acc .
+
+    # mirbase acc to all fly mirbase ids
+    ?macc mb:has_id ?mid .
+    ?mid up:database db:mirbase_id .
+    ?mid up:organism taxon:7227 .
+
+    GRAPH <{ibanez_method}> {{
+        ?mid obo:homologous_to ?hmid_old .
+    }}
+
+    # human mirbase id
+    ?hmid_old up:organism taxon:9606 .
+    ?hmid_old up:database db:mirbase_id .
+
+    # update mirbase id to current mirbase id
+    ?hmacc mb:has_id ?hmid_old .
+    ?hmacc up:database db:mirbase_acc .
+    ?hmacc a mb:mature_mirna .
+    ?hmacc mb:current_id ?hmid .
+    ?hmid up:database db:mirbase_id .
+    ?hmid up:organism taxon:9606 .
+    }}
+    '''.format(mid_orig=mir,
+               ibanez_method=IBANEZ_METHOD_TO_NG[ibanez_method])
+    return query_for_ids(query, 'hmid')
+
+
+def targets_of_mirs(mirbase_ids, species, db):
+    '''
+    Return a list of the union of all the targets of the mirnas in mirbase_ids,
+    for the given species and database.
+
+    db: MICROCOSM or TARGETSCAN
+    species: homo or mus
+    mirbase_ids: a list.
+    '''
+    func_map = {(homo, MICROCOSM): microcosm_predicted_human_mir_targets,
+                (homo, TARGETSCAN): targetscan_predicted_human_mir_targets,
+                (dro, MICROCOSM): microcosm_predicted_fly_mir_targets,
+                (dro, TARGETSCAN): targetscan_predicted_fly_mir_targets,}
+    return map_flatten_set_list(func_map[(species, db)], mirbase_ids)
+
+
+def fly_orthologs_of_targetscan_targets_of_human_mirs_homologous_to_fly_mir(
+    mirbase_id, ibanez_method):
+    '''
+    '''
+    mir = mirbase_id_iri(mirbase_id)
+    query = prefixes() + '''
+    SELECT DISTINCT ?fbg
+    WHERE {{
+    # original mirbase id to mature mirbase accession
+    ?dmacc mb:has_id <{dmid_orig}> .
+    ?dmacc a mb:mature_mirna .
+    ?dmacc up:database db:mirbase_acc .
+
+    # mirbase acc to all fly mirbase ids
+    ?dmacc mb:has_id ?dmid .
+    ?dmid up:database db:mirbase_id .
+    ?dmid up:organism taxon:7227 .
+
+    GRAPH <{ibanez_method}> {{
+        ?dmid obo:homologous_to ?hmid .
+    }}
+
+    # human mirbase id
+    ?hmid up:organism taxon:9606 .
+    ?hmid up:database db:mirbase_id .
+
+    # original mirbase id to mature mirbase accession
+    ?hmacc mb:has_id ?hmid .
+    ?hmacc a mb:mature_mirna .
+    ?hmacc up:database db:mirbase_acc .
+
+    # mirbase acc to targetscan mir family
+    ?tmf rdfs:seeAlso ?hmacc .
+    ?tmf up:database db:targetscan_mir_family .
+
+    # targetscan mir family to targeted refseq transcripts
+    ?tmf mb:targets ?ref .
+    ?ref up:database db:ncbi_refseq .
+
+    # refseq to uniprot
+    ?hu rdfs:seeAlso ?ref .
+
+    # human - fly orthologs
+    ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
+    ?du obo:orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
+
+    # uniprot to flybase gene .
+    ?du rdfs:seeAlso ?fbg .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    }}
+    '''.format(dmid_orig=mir, ibanez_method=ibanez_method)
+    return query_for_ids(query, 'gene')
+
+
+
+def targets_of_human_homologs_of_fly_mir(mirbase_id, ibanez_method, target_db):
+    '''
+    Get the human homologs of a fly mir and then get the targets of those
+    homologs.  Return the set of targets of the homologs, as a list.
+    '''
+    homolog_mirs = human_homologs_of_fly_mir(mirbase_id, ibanez_method)
+    return targets_of_mirs(homolog_mirs, homo, target_db)
+
+def targets_of_human_homologs_of_fly_mirs(mirbase_ids, ibanez_method,
+                                          target_db):
+    '''
+    Combine the targets of each homolog of each fly mirbase id into one
+    giant set, and retur the set as a list.
+    '''
+    func = functools.partial(targets_of_human_homologs_of_fly_mir,
+                             ibanez_method=ibanez_method, target_db=target_db)
+    return map_flatten_set_list(func, mirbase_ids)
+
+
+def slow_fly_orthologs_of_human_genes(genes):
+    return map_flatten_set_list(fly_orthologs_of_human_gene, genes)
+
+
+def fly_orthologs_of_human_genes(genes):
+    if not genes:
+        return []
+
+    gene_iris = [ensembl_gene_iri(gene) for gene in genes]
+    query = prefixes() + '''
+    SELECT DISTINCT ?fbg
+    WHERE {{
+    # human ensembl gene to uniprot
+    ?heg up:organism taxon:9606 .
+    ?heg up:database db:ensembl_gene .
+    ?hu rdfs:seeAlso ?heg .
+
+    FILTER ?heg IN ({hegs})
+
+    # human - fly orthologs
+    ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
+    ?du obo:orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
+
+    # uniprot to flybase gene .
+    ?du rdfs:seeAlso ?fbg .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+
+    }}
+    '''.format(hegs=', '.join('<{}>'.format(iri) for iri in gene_iris))
+    return query_for_ids(query, 'fbg')
+
+
+
+
+def fly_orthologs_of_human_gene(gene):
+    '''
+    gene: a human ensembl gene id.
+    returns: a list of flybase genes.
+    '''
+    gene_iri = ensembl_gene_iri(gene)
+    query = prefixes() + '''
+    SELECT DISTINCT ?fbg
+    WHERE {{
+    # human ensembl gene to uniprot
+    <{heg}> up:organism taxon:9606 .
+    <{heg}> up:database db:ensembl_gene .
+    ?hu rdfs:seeAlso <{heg}> .
+
+    # human - fly orthologs
+    ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
+    ?du obo:orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
+
+    # uniprot to flybase gene .
+    ?du rdfs:seeAlso ?fbg .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    }}
+    '''.format(heg=gene_iri)
+    return query_for_ids(query, 'fbg')
+
+
+def affymetrix_to_flybase_table():
+    query = prefixes() + '''
+    SELECT DISTINCT ?affy ?fbg
+    WHERE {
+        ?affy up:database db:affymetrix_probeset .
+        ?affy up:organism taxon:7227 .
+        ?affy rdfs:seeAlso ?fbg .
+        ?fbg up:database db:flybase_gene .
+        ?fbg up:organism taxon:7227 .
+    }
+    '''
+    return query_for_id_tuples(query, ['affy', 'fbg'])
 
 
 def screened_fly_mir_targets_in_tissue(mirbase_id, tissue):
@@ -778,117 +1327,9 @@ def screened_fly_mir_targets_in_tissue(mirbase_id, tissue):
 
 
 
-
-# PHASE I
-# HUMAN and FLY, MICROCOSM and TARGETSCAN, mirs targeting conserved synapse genes.
-# ALSO VALIDATED FLY MIRS
-
-def write_targetscan_human_mirs_targeting_conserved_synapse_genes():
-    mirs = sorted(targetscan_human_mirs_targeting_conserved_synapse_genes())
-    fn = os.path.join(config.datadir, 'predicted_targetscan_human_mirs_targeting_conserved_synapse_genes.txt')
-    with open(fn, 'w') as fh:
-        fh.write(''.join([mir + '\n' for mir in mirs]))
-
-
-def write_microcosm_human_mirs_targeting_conserved_synapse_genes():
-    mirs = sorted(microcosm_human_mirs_targeting_conserved_synapse_genes())
-    fn = os.path.join(config.datadir, 'predicted_microcosm_human_mirs_targeting_conserved_synapse_genes.txt')
-    with open(fn, 'w') as fh:
-        fh.write(''.join([mir + '\n' for mir in mirs]))
-
-
-def write_overlap_between_microcosm_human_mirs_and_targetscan_human_mirs():
-    fn = os.path.join(config.datadir, 'overlap_between_microcosm_and_targetscan_human_mirs.csv')
-    micro = set(microcosm_human_mirs_targeting_conserved_synapse_genes())
-    targ = set(targetscan_human_mirs_targeting_conserved_synapse_genes())
-    write_set_overlap_file(micro, targ, 'microcosm', 'targetscan', fn)
-
-
-def write_targetscan_fly_mirs_targeting_conserved_synapse_genes():
-    fn = os.path.join(config.datadir, 'predicted_targetscan_fly_mirs_targeting_conserved_synapse_genes.txt')
-    mirs = sorted(targetscan_fly_mirs_targeting_conserved_synapse_genes())
-    with open(fn, 'w') as fh:
-        fh.write(''.join([mir + '\n' for mir in mirs]))
-
-
-def write_microcosm_fly_mirs_targeting_conserved_synapse_genes():
-    '''
-    Write a list of fly mirs that are predicted to target genes that are
-    orthologous to human synaptic genes (according the synapsedb).
-    '''
-    fn = os.path.join(config.datadir, 'predicted_microcosm_fly_mirs_targeting_conserved_synapse_genes.txt')
-    mirs = sorted(microcosm_fly_mirs_targeting_conserved_synapse_genes())
-    with open(fn, 'w') as fh:
-        fh.write(''.join([mir + '\n' for mir in mirs]))
-
-
-def write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs():
-    fn = os.path.join(config.datadir, 'overlap_between_validated_and_predicted_microcosm_fly_mirs.csv')
-    predicted = set(microcosm_fly_mirs_targeting_conserved_synapse_genes())
-    validated = set(validated_mirs)
-    write_set_overlap_file(validated, predicted, 'validated', 'predicted', fn)
-
-
-def write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs():
-    fn = os.path.join(config.datadir, 'overlap_between_validated_and_predicted_targetscan_fly_mirs.csv')
-    predicted = set(targetscan_fly_mirs_targeting_conserved_synapse_genes())
-    validated = set(validated_mirs)
-    write_set_overlap_file(validated, predicted, 'validated', 'predicted', fn)
-
-
-def write_overlap_between_microcosm_fly_mirs_and_targetscan_fly_mirs():
-    fn = os.path.join(config.datadir, 'overlap_between_microcosm_and_targetscan_fly_mirs.csv')
-    micro = set(microcosm_fly_mirs_targeting_conserved_synapse_genes())
-    targ = set(targetscan_fly_mirs_targeting_conserved_synapse_genes())
-    write_set_overlap_file(micro, targ, 'microcosm', 'targetscan', fn)
-
-
-# PHASE II
-# SETS and OVERLAPS for
-# For EACH SCREENED MIR
-#     MICROCOSM TARGETED FLY GENES (FBgn)
-#     TARGETSCAN TARGETED FLY GENES (FBgn)
-#     MICROCOSM TARGETED HUMAN GENES (ENSG)
-#     TARGETSCAN TARGETED HUMAN GENES (ENSG)
-#     For EACH TISSUE TYPE
-#         SCREENED REGULATED FLY GENES (FBgn)
-# - TARGETS OF 7 SCREENED MIRS in 2 TISSUES VS PREDICTED TARGETS of MICROCOSM and TARGETSCAN
-
-def write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets():
-    for mir in screened_mirs:
-        microcosm_targets = set(mircocosm_predicted_fly_mir_targets(mir))
-        targetscan_targets = set(targetscan_predicted_fly_mir_targets(mir))
-        mt_fn = os.path.join(config.datadir, '{}_overlap_between_microcosm_and_targetscan_targets.csv'.format(mir))
-        write_set_overlap_file(microcosm_targets, targetscan_targets, 'microcosm', 'targetscan', mt_fn)
-        for tissue in TISSUES:
-            screened_targets = set(screened_fly_mir_targets_in_tissue(mir, tissue))
-            sm_fn = os.path.join(config.datadir, '{}_{}_overlap_between_screened_and_microcosm_targets.csv'.format(mir, tissue))
-            write_set_overlap_file(screened_targets, microcosm_targets, 'screened', 'microcosm', sm_fn)
-            st_fn = os.path.join(config.datadir, '{}_{}_overlap_between_screened_and_targetscan_targets.csv'.format(mir, tissue))
-            write_set_overlap_file(screened_targets, targetscan_targets, 'screened', 'targetscan', st_fn)
-
-
-def write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes():
-    nmj_rnai = set(get_nmj_rnai_genes())
-    for mir in screened_mirs:
-        for tissue in TISSUES:
-            screened_targets = set(screened_fly_mir_targets_in_tissue(mir, tissue))
-            fn = os.path.join(config.datadir, 'overlap_of_nmj_rnai_genes_and_screened_fly_targets',
-                              '{}_{}_overlap_between_nmj_rnai_genes_and_screened_fly_targets.csv'.format(mir, tissue))
-            write_set_overlap_file(nmj_rnai, screened_targets, 'nmj_rnai_genes', 'screened', fn)
-
-
-def write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes():
-    nmj_rnai = set(get_nmj_rnai_genes())
-    for mir in validated_mirs:
-        microcosm_targets = set(mircocosm_predicted_fly_mir_targets(mir))
-        fn = os.path.join(config.datadir, 'overlap_of_nmj_rnai_genes_and_predicted_fly_targets',
-                          '{}_overlap_of_nmj_rnai_genes_and_microcosm_fly_targets.csv'.format(mir))
-        write_set_overlap_file(nmj_rnai, microcosm_targets, 'nmj_rnai_genes', 'microcosm', fn)
-        targetscan_targets = set(targetscan_predicted_fly_mir_targets(mir))
-        fn = os.path.join(config.datadir, 'overlap_of_nmj_rnai_genes_and_predicted_fly_targets',
-                          '{}_overlap_of_nmj_rnai_genes_and_targetscan_fly_targets.csv'.format(mir))
-        write_set_overlap_file(nmj_rnai, targetscan_targets, 'nmj_rnai_genes', 'targetscan', fn)
+def results_dir():
+    dn = datetime.datetime.now().strftime('%Y%m%d') + '_results'
+    return makedirs(os.path.join(config.datadir, dn))
 
 
 def write_set_overlap_file(set1, set2, name1, name2, filename):
@@ -915,6 +1356,187 @@ def write_set_overlap_file(set1, set2, name1, name2, filename):
             one=name1, two=name2))
         for row in itertools.izip_longest(one_not_two, one_and_two, two_not_one, fillvalue=''):
             fh.write(','.join([str(i) for i in row]) + '\n')
+
+
+def write_list_file(items, filename):
+    makedirs(os.path.dirname(filename))
+    with open(filename, 'w') as fh:
+        fh.write(''.join([item + '\n' for item in items]))
+
+
+def write_csv_file(rows, filename, headers=None):
+    '''
+    :param rows: list of rows, where each row is a list of value.
+    :param headers: list of strings, used as a header row.  If None, no header
+    row will be output.
+    '''
+    with open(filename, 'w') as fh:
+        writer = csv.writer(fh)
+        if headers:
+            writer.writerow(headers)
+        for row in rows:
+            writer.writerow(row)
+
+
+# PHASE I
+# HUMAN and FLY, MICROCOSM and TARGETSCAN, mirs targeting conserved synapse genes.
+# ALSO VALIDATED FLY MIRS
+
+def write_targetscan_human_mirs_targeting_conserved_synapse_genes():
+    dn = os.path.join(results_dir(), 'phase1')
+    mirs = sorted(targetscan_human_mirs_targeting_conserved_synapse_genes())
+    fn = os.path.join(dn, 'predicted_targetscan_human_mirs_targeting_conserved_synapse_genes.txt')
+    write_list_file(mirs, fn)
+
+
+def write_microcosm_human_mirs_targeting_conserved_synapse_genes():
+    dn = os.path.join(results_dir(), 'phase1')
+    mirs = sorted(microcosm_human_mirs_targeting_conserved_synapse_genes())
+    fn = os.path.join(dn, 'predicted_microcosm_human_mirs_targeting_conserved_synapse_genes.txt')
+    write_list_file(mirs, fn)
+
+
+def write_overlap_between_microcosm_human_mirs_and_targetscan_human_mirs():
+    dn = os.path.join(results_dir(), 'phase1')
+    fn = os.path.join(dn, 'overlap_between_microcosm_and_targetscan_human_mirs.csv')
+    micro = set(microcosm_human_mirs_targeting_conserved_synapse_genes())
+    targ = set(targetscan_human_mirs_targeting_conserved_synapse_genes())
+    write_set_overlap_file(micro, targ, 'microcosm', 'targetscan', fn)
+
+
+def write_targetscan_fly_mirs_targeting_conserved_synapse_genes():
+    dn = os.path.join(results_dir(), 'phase1')
+    fn = os.path.join(dn, 'predicted_targetscan_fly_mirs_targeting_conserved_synapse_genes.txt')
+    mirs = sorted(targetscan_fly_mirs_targeting_conserved_synapse_genes())
+    write_list_file(mirs, fn)
+
+
+def write_microcosm_fly_mirs_targeting_conserved_synapse_genes():
+    '''
+    Write a list of fly mirs that are predicted to target genes that are
+    orthologous to human synaptic genes (according the synapsedb).
+    '''
+    dn = os.path.join(results_dir(), 'phase1')
+    fn = os.path.join(dn, 'predicted_microcosm_fly_mirs_targeting_conserved_synapse_genes.txt')
+    mirs = sorted(microcosm_fly_mirs_targeting_conserved_synapse_genes())
+    write_list_file(mirs, fn)
+
+
+def write_overlap_between_microcosm_fly_mirs_and_targetscan_fly_mirs():
+    dn = os.path.join(results_dir(), 'phase1')
+    fn = os.path.join(dn, 'overlap_between_microcosm_and_targetscan_fly_mirs.csv')
+    micro = set(microcosm_fly_mirs_targeting_conserved_synapse_genes())
+    targ = set(targetscan_fly_mirs_targeting_conserved_synapse_genes())
+    write_set_overlap_file(micro, targ, 'microcosm', 'targetscan', fn)
+
+
+def write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs():
+    dn = os.path.join(results_dir(), 'phase1')
+    fn = os.path.join(dn, 'overlap_between_validated_and_predicted_microcosm_fly_mirs.csv')
+    predicted = set(microcosm_fly_mirs_targeting_conserved_synapse_genes())
+    validated = set(validated_mirs)
+    write_set_overlap_file(validated, predicted, 'validated', 'predicted', fn)
+
+
+def write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs():
+    dn = os.path.join(results_dir(), 'phase1')
+    fn = os.path.join(dn, 'overlap_between_validated_and_predicted_targetscan_fly_mirs.csv')
+    predicted = set(targetscan_fly_mirs_targeting_conserved_synapse_genes())
+    validated = set(validated_mirs)
+    write_set_overlap_file(validated, predicted, 'validated', 'predicted', fn)
+
+
+def write_conserved_synaptic_genes():
+    dn = os.path.join(results_dir(), 'conserved_synapse_genes')
+    fn = os.path.join(dn, 'fly_conserved_synapse_genes.txt')
+    genes = fly_conserved_synapse_genes()
+    write_list_file(genes, fn)
+    fn = os.path.join(dn, 'human_conserved_synapse_genes.txt')
+    genes = human_conserved_synapse_genes()
+    write_list_file(genes, fn)
+
+
+def write_affymetrix_to_flybase_table():
+    fn = os.path.join(results_dir(), 'affymetrix_to_flybase_genes.csv')
+    write_csv_file(affymetrix_to_flybase_table(), fn,
+                   headers=('affymetrix_probeset_id', 'flybase_gene'))
+
+def write_human_to_fly_conserved_synapse_genes_table():
+    dn = os.path.join(results_dir(), 'conserved_synapse_genes')
+    fn = os.path.join(dn, 'human_to_fly_conserved_synapse_genes.csv')
+    write_csv_file(human_to_fly_conserved_synapse_genes_table(), fn,
+                   headers=('ensembl_gene', 'flybase_gene'))
+
+
+def write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs():
+    dn = os.path.join(results_dir(), 'overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs')
+    # filename template
+    fnt = 'overlap_of_{}_{}_targets_and_conserved_human_mir_{}_homolog_targets'
+    for target_db in [MICROCOSM, TARGETSCAN]:
+        for ibanez_method in [FIVE_PRIME, SEVENTY_PERCENT]:
+            for mir in validated_mirs[:1]:
+                print target_db, ibanez_method, mir
+                fn = os.path.join(dn, fnt.format(mir, target_db, ibanez_method))
+                fly_targets = set(targets_of_mirs([mir], dro, target_db))
+                fly_ortholog_targets = set(fly_orthologs_of_targetscan_targets_of_human_mirs_homologous_to_fly_mir(
+                    mir, ibanez_method))
+                write_set_overlap_file(fly_targets, fly_ortholog_targets,
+                                       'fly_targets', 'human_target_orthologs',
+                                       fn)
+                # homo_targets = targets_of_human_homologs_of_fly_mir(
+                    # mir, ibanez_method, target_db)
+                # fly_ortholog_targets = fly_orthologs_of_human_genes(homo_targets)
+
+
+# PHASE II
+# SETS and OVERLAPS for
+# For EACH SCREENED MIR
+#     MICROCOSM TARGETED FLY GENES (FBgn)
+#     TARGETSCAN TARGETED FLY GENES (FBgn)
+#     MICROCOSM TARGETED HUMAN GENES (ENSG)
+#     TARGETSCAN TARGETED HUMAN GENES (ENSG)
+#     For EACH TISSUE TYPE
+#         SCREENED REGULATED FLY GENES (FBgn)
+# - TARGETS OF 7 SCREENED MIRS in 2 TISSUES VS PREDICTED TARGETS of MICROCOSM and TARGETSCAN
+#
+# FOR EACH VALIDATED FLY MIR:
+#     PREDICTED TARGETS OF THE FLY MIR COMPARED TO (UNION OF PREDICTED TARGETS OF THE HUMAN HOMOLOGS OF THE FLY MIR)
+
+def write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets():
+    dn = os.path.join(results_dir(), 'overlap_of_screened_and_predicted_target_genes')
+    for mir in screened_mirs:
+        microcosm_targets = set(microcosm_predicted_fly_mir_targets(mir))
+        targetscan_targets = set(targetscan_predicted_fly_mir_targets(mir))
+        mt_fn = os.path.join(dn, '{}_overlap_between_microcosm_and_targetscan_targets.csv'.format(mir))
+        write_set_overlap_file(microcosm_targets, targetscan_targets, 'microcosm', 'targetscan', mt_fn)
+        for tissue in TISSUES:
+            screened_targets = set(screened_fly_mir_targets_in_tissue(mir, tissue))
+            sm_fn = os.path.join(dn, '{}_{}_overlap_between_screened_and_microcosm_targets.csv'.format(mir, tissue))
+            write_set_overlap_file(screened_targets, microcosm_targets, 'screened', 'microcosm', sm_fn)
+            st_fn = os.path.join(dn, '{}_{}_overlap_between_screened_and_targetscan_targets.csv'.format(mir, tissue))
+            write_set_overlap_file(screened_targets, targetscan_targets, 'screened', 'targetscan', st_fn)
+
+
+def write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes():
+    dn = os.path.join(results_dir(), 'overlap_of_nmj_rnai_genes_and_screened_fly_targets')
+    nmj_rnai = set(get_nmj_rnai_genes())
+    for mir in screened_mirs:
+        for tissue in TISSUES:
+            screened_targets = set(screened_fly_mir_targets_in_tissue(mir, tissue))
+            fn = os.path.join(dn, '{}_{}_overlap_between_nmj_rnai_genes_and_screened_fly_targets.csv'.format(mir, tissue))
+            write_set_overlap_file(nmj_rnai, screened_targets, 'nmj_rnai_genes', 'screened', fn)
+
+
+def write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes():
+    dn = os.path.join(results_dir(), 'overlap_of_nmj_rnai_genes_and_predicted_fly_targets')
+    nmj_rnai = set(get_nmj_rnai_genes())
+    for mir in validated_mirs:
+        microcosm_targets = set(microcosm_predicted_fly_mir_targets(mir))
+        fn = os.path.join(dn, '{}_overlap_of_nmj_rnai_genes_and_microcosm_fly_targets.csv'.format(mir))
+        write_set_overlap_file(nmj_rnai, microcosm_targets, 'nmj_rnai_genes', 'microcosm', fn)
+        targetscan_targets = set(targetscan_predicted_fly_mir_targets(mir))
+        fn = os.path.join(dn, '{}_overlap_of_nmj_rnai_genes_and_targetscan_fly_targets.csv'.format(mir))
+        write_set_overlap_file(nmj_rnai, targetscan_targets, 'nmj_rnai_genes', 'targetscan', fn)
 
 
 ###############################
@@ -1045,6 +1667,28 @@ def print_ibanez_fly_human_homologs():
 ###################
 # ROUNDUP FUNCTIONS
 
+def download_roundup_from_sparql():
+    qry = '''
+    PREFIX up:<http://purl.uniprot.org/core/> 
+    PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
+    PREFIX obo:<http://purl.org/obo/owl/obo#>
+    CONSTRUCT { 
+        ?gene1 obo:orthologous_to ?gene2 .
+        ?gene2 obo:orthologous_to ?gene1 .
+        ?gene1 up:organism taxon:7227 .
+        ?gene2 up:organism taxon:9606 .
+    }
+    WHERE {
+        ?gene1 obo:orthologous_to ?gene2 .
+        ?gene1 up:organism taxon:7227 .
+        ?gene2 up:organism taxon:9606 .
+    }
+    '''
+    url = 'http://sparql.roundup.hms.harvard.edu:8890/sparql'
+    filename = roundup_sparql_rdf_path()
+    makedirs(os.path.dirname(filename))
+    return download_sparql_construct_rdf(qry, filename, endpoint=url)
+
 
 def gen_orthologs(query_taxon, subject_taxon, divergence='0.8', evalue='1e-5',
                   version='4'):
@@ -1057,6 +1701,13 @@ def gen_orthologs(query_taxon, subject_taxon, divergence='0.8', evalue='1e-5',
                 kind, qid, sid, distance = line.rstrip('\n').split('\t')
                 distance = float(distance)
                 yield qid, sid, distance
+
+
+def roundup_sparql_rdf_path(taxon1='7227', taxon2='9606', version='qfo_2013_04'):
+    # lexicographically normalize taxons
+    taxon1, taxon2 = sorted([taxon1, taxon2])
+    d = os.path.join(config.datadir, 'roundup', version)
+    return os.path.join(d, 'roundup-{}_{}-orthologs.nt'.format(taxon1, taxon2))
 
 
 def roundup_rdf_path(divergence='0.8', evalue='1e-5', version='4'):
@@ -1279,9 +1930,20 @@ def uniprot_homo_ensembl_transcript_rdf_path():
                         'uniprot_homo_ensembl_transcript.nt')
 
 
-def download_uniprot_fly_rdf():
-    # Construct triples for every fly uniprot entry.
-    # Say that they are proteins, from fly, and from uniprot.
+def download_uniprot_sparql_rdf(construct_phrase, where_phrase, taxon,
+                                filename, min_count, substitution = None):
+    '''
+    construct_phrase: str.  A query fragment for what triples to create.
+    taxon: e.g '7227' (fly) or '9606' (human)
+    where_phrase: str. A query fragment for what pattern to match.  It is
+    appended to patterns to look for up:Protein triples with up:organism
+    taxon:<taxon> triples.
+    substitution: if not None, a tuple of pattern and replacement to be used by
+    an re.sub() call to alter each triple line.  E.g.:
+        (r'http://purl.uniprot.org/ucsc/', r'http://purl.flybase.org/annotation_id/')
+    min_count: int.  Minor sanity check and bias.  If fewer than min_count
+    triples are returned, an exception will be raised.
+    '''
     qry = '''
         PREFIX up:<http://purl.uniprot.org/core/> 
         PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
@@ -1293,150 +1955,115 @@ def download_uniprot_fly_rdf():
         PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
         PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
         PREFIX db:<http://purl.uniprot.org/database/>
-        CONSTRUCT { 
+        CONSTRUCT {{
+        {construct}
+        }}
+        WHERE {{
           ?protein a up:Protein .
-          ?protein up:organism taxon:7227 .
-          ?protein up:database <''' + uniprot_db + '''> .
-        }
-        WHERE {
-          ?protein a up:Protein .
-          ?protein up:organism taxon:7227 .
-        }
-    '''
+          ?protein up:organism taxon:{taxon} .
+          {where}
+        }}
+    '''.format(construct=construct_phrase, taxon=taxon, where=where_phrase)
+    nt = download_sparql_ntriples(qry, uniprot_sparql_url)
+    if substitution:
+        # Change UniProt URIs to my URIs
+        def fix(line):
+            return re.sub(substitution[0], substitution[1], line)
+        nt = ''.join(fix(line) for line in StringIO.StringIO(nt))
+    count = count_and_write_ntriples(nt, filename)
+    # As of 2013/07 there were 14953 fly flybase annotations.
+    if count < min_count:
+        raise Exception('Expected >= {} triples.'.format(min_count), count)
+
+
+def download_uniprot_fly_rdf():
     fn = uniprot_fly_rdf_path()
-    count = download_uniprot_xrefs(qry, fn)
+    taxon = '7227'
+    construct = '''
+        ?protein a up:Protein .
+        ?protein up:organism taxon:{taxon} .
+        ?protein up:database <{db}> .
+        '''.format(taxon=taxon, db=uniprot_db)
+    where = ''
     # As of 2013/07 there were 37828 fly uniprots.
-    if count < 30000 * 3:
-        raise Exception('Expected more triples.', count)
+    min_count = 30000 * 3
+    download_uniprot_sparql_rdf(construct, where, taxon, fn, min_count)
 
 
 def download_uniprot_homo_rdf():
-    # Construct triples for every homo uniprot entry.
-    # Say that they are proteins, from homo, and from uniprot.
-    qry = '''
-        PREFIX up:<http://purl.uniprot.org/core/> 
-        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
-        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
-        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
-        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
-        PREFIX bibo:<http://purl.org/ontology/bibo/> 
-        PREFIX dc:<http://purl.org/dc/terms/> 
-        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
-        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
-        PREFIX db:<http://purl.uniprot.org/database/>
-        CONSTRUCT { 
-          ?protein a up:Protein .
-          ?protein up:organism taxon:9606 .
-          ?protein up:database <''' + uniprot_db + '''> .
-        }
-        WHERE {
-          ?protein a up:Protein .
-          ?protein up:organism taxon:9606 .
-        }
-    '''
     fn = uniprot_homo_rdf_path()
-    count = download_uniprot_xrefs(qry, fn)
+    taxon = '9606'
+    construct = '''
+        ?protein a up:Protein .
+        ?protein up:organism taxon:{taxon} .
+        ?protein up:database <{db}> .
+        '''.format(taxon=taxon, db=uniprot_db)
+    where = ''
     # As of 2013/07 there were 134288 homo uniprots.
-    if count < 130000 * 3:
-        raise Exception('Expected more triples.', count)
+    min_count = 130000 * 3
+    download_uniprot_sparql_rdf(construct, where, taxon, fn, min_count)
 
 
 def download_uniprot_flybase_annotation_rdf():
-    qry = '''
-        PREFIX up:<http://purl.uniprot.org/core/> 
-        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
-        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
-        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
-        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
-        PREFIX bibo:<http://purl.org/ontology/bibo/> 
-        PREFIX dc:<http://purl.org/dc/terms/> 
-        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
-        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
-        PREFIX db:<http://purl.uniprot.org/database/>
-        CONSTRUCT { 
-          ?protein rdfs:seeAlso ?xref .
-          ?xref up:organism taxon:7227 .
-          ?xref up:database <''' + flybase_annotation_db + '''> .
-        }
-        WHERE {
-          ?protein a up:Protein .
-          ?protein up:organism taxon:7227 .
-          ?protein rdfs:seeAlso ?xref . 
-          ?xref up:database db:UCSC .
-        }
-    '''
     fn = uniprot_flybase_annotation_rdf_path()
-    count = download_uniprot_xrefs(qry, fn)
-    # As of 2013/07 there were 14953 fly flybase annotations.
-    if count < 14000 * 3:
-        raise Exception('Expected more triples.', count)
+    taxon = '7227'
+    construct = '''
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:organism taxon:{taxon} .
+        ?xref up:database <{db}> .
+        '''.format(taxon=taxon, db=flybase_annotation_db)
+    where = ''' 
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:database db:UCSC .
+        '''
+    # As of 2013/07 there were 134288 homo uniprots.
+    min_count = 14000 * 3
+    sub = (r'http://purl.uniprot.org/ucsc/',
+           r'http://purl.flybase.org/annotation_id/')
+    download_uniprot_sparql_rdf(construct, where, taxon, fn, min_count, sub)
 
 
 def download_uniprot_flybase_gene_rdf():
-    qry = '''
-        PREFIX up:<http://purl.uniprot.org/core/> 
-        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
-        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
-        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
-        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
-        PREFIX bibo:<http://purl.org/ontology/bibo/> 
-        PREFIX dc:<http://purl.org/dc/terms/> 
-        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
-        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
-        PREFIX db:<http://purl.uniprot.org/database/>
-        CONSTRUCT { 
-          ?protein rdfs:seeAlso ?xref .
-          ?xref up:organism taxon:7227 .
-          ?xref up:database <''' + flybase_gene_db + '''> .
-        }
-        WHERE {
-          ?protein a up:Protein .
-          ?protein up:organism taxon:7227 .
-          ?protein rdfs:seeAlso ?xref .
-          ?xref up:database db:FlyBase .
-        }
-    '''
     fn = uniprot_flybase_gene_rdf_path()
-    count = download_uniprot_xrefs(qry, fn)
+    taxon = '7227'
+    construct = '''
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:organism taxon:{taxon} .
+        ?xref up:database <{db}> .
+        '''.format(taxon=taxon, db=flybase_gene_db)
+    where = ''' 
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:database db:FlyBase .
+        '''
     # As of 2013/07 there were 23348 fly protein + flybase gene annotations.
     # And 13k unique flybase genes in those annotation
     # Wrote 50988 triples.
-    if count < 50000:
-        raise Exception('Expected more triples.', count)
+    min_count = 50000
+    sub = (r'http://purl.uniprot.org/flybase/',
+           r'http://purl.flybase.org/gene_id/')
+    download_uniprot_sparql_rdf(construct, where, taxon, fn, min_count, sub)
 
 
 def download_uniprot_flybase_transcript_rdf():
     # UniProt annotates proteins with flybase transcripts (FBtr* ids) using
     # the database EnsemblMetazoa.
-    qry = '''
-        PREFIX up:<http://purl.uniprot.org/core/> 
-        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
-        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
-        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
-        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
-        PREFIX bibo:<http://purl.org/ontology/bibo/> 
-        PREFIX dc:<http://purl.org/dc/terms/> 
-        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
-        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
-        PREFIX db:<http://purl.uniprot.org/database/>
-        CONSTRUCT { 
-          ?protein rdfs:seeAlso ?xref .
-          ?xref up:organism taxon:7227 .
-          ?xref up:database <''' + flybase_transcript_db + '''> .
-        }
-        WHERE {
-          ?protein a up:Protein .
-          ?protein up:organism taxon:7227 .
-          ?protein rdfs:seeAlso ?xref .
-          ?xref up:database db:EnsemblMetazoa .
-        }
-    '''
     fn = uniprot_flybase_transcript_rdf_path()
-    count = download_uniprot_xrefs(qry, fn)
+    taxon = '7227'
+    construct = '''
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:organism taxon:{taxon} .
+        ?xref up:database <{db}> .
+        '''.format(taxon=taxon, db=flybase_transcript_db)
+    where = ''' 
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:database db:EnsemblMetazoa .
+        '''
     # As of 2013/07 there were 21819 fly flybase transcript annotations.
     # Wrote 65457 triples.
-    if count < 60000:
-        raise Exception('Expected more triples.', count)
+    min_count = 60000
+    sub = (r'http://purl.uniprot.org/ensemblmetazoa/',
+           r'http://purl.flybase.org/transcript_id/')
+    download_uniprot_sparql_rdf(construct, where, taxon, fn, min_count, sub)
 
 
 def download_uniprot_homo_refseq_rdf():
@@ -1445,148 +2072,78 @@ def download_uniprot_homo_refseq_rdf():
     # NP_* URIs.  Weird.  Also, strip the version number off the refseq ids,
     # since the TargetScan transcript ids do not have the version number
     # suffix.
-    qry = '''
-        PREFIX up:<http://purl.uniprot.org/core/> 
-        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
-        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
-        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
-        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
-        PREFIX bibo:<http://purl.org/ontology/bibo/> 
-        PREFIX dc:<http://purl.org/dc/terms/> 
-        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
-        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
-        PREFIX db:<http://purl.uniprot.org/database/>
-        CONSTRUCT { 
-          ?protein rdfs:seeAlso ?xrefuri .
-          ?protein rdfs:seeAlso ?xref2uri .
-          ?xrefuri up:organism taxon:9606 .
-          ?xref2uri up:organism taxon:9606 .
-          ?xrefuri up:database <''' + refseq_db + '''> .
-          ?xref2uri up:database <''' + refseq_db + '''> .
-        }
-        WHERE {
-          ?protein a up:Protein .
-          ?protein up:organism taxon:9606 .
-          ?protein rdfs:seeAlso ?xref . 
-          ?xref up:database db:RefSeq .
-          ?xref rdfs:comment ?xref2 .
-          BIND (URI(REPLACE(str(?xref), 
-            '(\\\\d+)\\\\.\\\\d+$', '$1')) as ?xrefuri)
-          BIND (URI(CONCAT('http://purl.uniprot.org/refseq/', 
-            REPLACE(?xref2, '(\\\\d+)\\\\.\\\\d+$', '$1'))) as ?xref2uri)
-        }
-    '''
     fn = uniprot_homo_refseq_rdf_path()
-    count = download_uniprot_xrefs(qry, fn)
-    # As of 2013/07 there were 83574 homo refseq annotation.
-    # Wrote 250652 triples.
-    if count < 80000 * 3:
-        raise Exception('Expected more triples.', count)
+    taxon = '9606'
+    construct = '''
+        ?protein rdfs:seeAlso ?xrefuri .
+        ?protein rdfs:seeAlso ?xref2uri .
+        ?xrefuri up:organism taxon:{taxon} .
+        ?xref2uri up:organism taxon:{taxon} .
+        ?xrefuri up:database <{db}> .
+        ?xref2uri up:database <{db}> .
+        '''.format(taxon=taxon, db=refseq_db)
+    where = ''' 
+        ?protein rdfs:seeAlso ?xref . 
+        ?xref up:database db:RefSeq .
+        ?xref rdfs:comment ?xref2 .
+        BIND (URI(REPLACE(str(?xref), 
+          '(\\\\d+)\\\\.\\\\d+$', '$1')) as ?xrefuri)
+        BIND (URI(CONCAT('http://purl.uniprot.org/refseq/', 
+          REPLACE(?xref2, '(\\\\d+)\\\\.\\\\d+$', '$1'))) as ?xref2uri)
+        '''
+    # As of 2013/07 there were 21819 fly flybase transcript annotations.
+    # Wrote 65457 triples.
+    min_count = 80000 * 3
+    sub = (r'http://purl.uniprot.org/refseq/',
+           r'http://purl.ncbi.nlm.nih.gov/refseq/')
+    download_uniprot_sparql_rdf(construct, where, taxon, fn, min_count, sub)
 
 
 def download_uniprot_homo_ensembl_transcript_rdf():
-    qry = '''
-        PREFIX up:<http://purl.uniprot.org/core/> 
-        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
-        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
-        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
-        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
-        PREFIX bibo:<http://purl.org/ontology/bibo/> 
-        PREFIX dc:<http://purl.org/dc/terms/> 
-        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
-        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
-        PREFIX db:<http://purl.uniprot.org/database/>
-        CONSTRUCT { 
-          ?protein rdfs:seeAlso ?xref .
-          ?xref up:organism taxon:9606 .
-          ?xref up:database <''' + ensembl_transcript_db + '''> .
-        }
-        WHERE {
-          ?protein a up:Protein .
-          ?protein up:organism taxon:9606 .
-          ?protein rdfs:seeAlso ?xref . 
-          ?xref up:database db:Ensembl .
-          ?xref a up:Transcript_Resource .
-        }
-    '''
     fn = uniprot_homo_ensembl_transcript_rdf_path()
-    count = download_uniprot_xrefs(qry, fn)
+    taxon = '9606'
+    construct = '''
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:organism taxon:{taxon} .
+        ?xref up:database <{db}> .
+        '''.format(taxon=taxon, db=ensembl_transcript_db)
+    where = ''' 
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:database db:Ensembl .
+        ?xref a up:Transcript_Resource .
+        '''
     # As of 2013/07 there were 98088 homo ensembl transcript annotations.
     # Wrote 294078 triples.
-    if count < 90000 * 3:
-        raise Exception('Expected more triples.', count)
+    min_count = 90000 * 3
+    sub = (r'http://purl.uniprot.org/ensembl/',
+           r'http://purl.ensembl.org/transcript/')
+    download_uniprot_sparql_rdf(construct, where, taxon, fn, min_count, sub)
+
 
 def download_uniprot_homo_ensembl_gene_rdf():
-    qry = '''
-        PREFIX up:<http://purl.uniprot.org/core/> 
-        PREFIX rdf:<http://www.w3.org/1999/02/22-rdf-syntax-ns#> 
-        PREFIX rdfs:<http://www.w3.org/2000/01/rdf-schema#> 
-        PREFIX skos:<http://www.w3.org/2004/02/skos/core#> 
-        PREFIX owl:<http://www.w3.org/2002/07/owl#> 
-        PREFIX bibo:<http://purl.org/ontology/bibo/> 
-        PREFIX dc:<http://purl.org/dc/terms/> 
-        PREFIX xsd:<http://www.w3.org/2001/XMLSchema#> 
-        PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
-        PREFIX db:<http://purl.uniprot.org/database/>
-        CONSTRUCT { 
-          ?protein rdfs:seeAlso ?xref .
-          ?xref up:organism taxon:9606 .
-          ?xref up:database <''' + ensembl_gene_db + '''> .
-        }
-        WHERE {
-          ?protein a up:Protein .
-          ?protein up:organism taxon:9606 .
-          ?protein rdfs:seeAlso ?enst .
-          ?enst up:database db:Ensembl .
-          ?enst a up:Transcript_Resource .
-          ?enst up:transcribedFrom ?xref .
-        }
-    '''
     fn = uniprot_homo_ensembl_gene_rdf_path()
-    count = download_uniprot_xrefs(qry, fn)
+    taxon = '9606'
+    construct = '''
+        ?protein rdfs:seeAlso ?xref .
+        ?xref up:organism taxon:{taxon} .
+        ?xref up:database <{db}> .
+        '''.format(taxon=taxon, db=ensembl_gene_db)
+    where = ''' 
+        ?protein rdfs:seeAlso ?enst .
+        ?enst up:database db:Ensembl .
+        ?enst a up:Transcript_Resource .
+        ?enst up:transcribedFrom ?xref .
+        '''
     # As of 2013/07 there were 72427 homo ensembl gene annotations.
     # Wrote 216873 triples.  Note that this is odd, b/c there are
     # 71237 distinct pairs of ?protein and ?xref, and 22092 distinct
     # ?xrefs in the query above.  So we would expect 71237 + 2 * 22092 triples
     # (= 115421).  There are that many distinct triples, so the construct
     # query returned non-distinct triples.  Weird.
-    if count < 70000 * 3:
-        raise Exception('Expected more triples.', count)
-
-
-def download_uniprot_xrefs(qry, filename, validate=None):
-    '''
-    Return the count of lines (triples) returned from the query.
-    qry: a SPARQL construct query.
-    filename: where to save the constructed triples (as N-Triples).
-    validate: a function to validate each line.
-    '''
-    if validate == None:
-        def validate(line):
-            pass
-    version = get_uniprot_version_of_sparql_endpoint()
-    print 'Downloading Xrefs for UniProt version:', version
-    print 'Query:', qry
-    sp = sparql.Sparql('http://beta.sparql.uniprot.org')
-    try:
-        # Use text/plain for N-triples
-        nt = sp.query(qry, accept='text/plain')
-    except Exception as e:
-        print dir(e)
-        print e.response.text
-        print e.response.headers
-        raise
-
-    print 'Writing triples to file:', filename
-    count = 0
-    with open(filename, 'w') as fh:
-        for line in StringIO.StringIO(nt):
-            count += 1
-            validate(line)
-            fh.write(line)
-
-    print 'Wrote {} triples.'.format(count)
-    return count
+    min_count = 70000 * 3
+    sub = (r'http://purl.uniprot.org/ensembl/',
+           r'http://purl.ensembl.org/gene/')
+    download_uniprot_sparql_rdf(construct, where, taxon, fn, min_count, sub)
 
 
 def download_uniprot_idmapping():
@@ -1603,6 +2160,21 @@ from the uniprot sparql endpoint, http://beta.sparql.uniprot.org/.
 
 def write_uniprot_rdf():
     '''
+    Generate triples mapping uniprot ids to other ids that we are interested 
+    in, like RefSeq mRNA ids, FlyBase gene ids, FlyBase transcript ids, 
+    Human Ensembl transcript ids, Human Ensembl gene ids, and FlyBase
+    annotation ids.  For each mapping, generate:
+
+    - a "seeAlso" triple between the uniprot id and the mapped id
+    - a "database" triple for the mapped id
+
+    Also, for each unique uniprot id, generate:
+
+    - a "database" triple for the uniprot id
+
+    Note that "organism" triples are not generated, because with the exception
+    of the Ensembl ids, it is not possible to know specifically the taxon the
+    ids come from.
     '''
     print 'write_uniprot_rdf'
     # id dbs, id kind, uniprot id mapping file
@@ -1613,29 +2185,26 @@ def write_uniprot_rdf():
     # ensembl transcript ids (microcosm) (human), YES, idmapping.Ensembl_TRS.dat
     # ensembl gene ids (synaptomedb) (human), YES, idmapping.Ensembl.dat
     xref_data = [
-        (refseq_iri, 'RefSeq_NT', re.compile(r'^(NM_\d+)\.\d+$'), homo_iri, refseq_db),
-        (flybase_annotation_iri, 'UCSC', flybase_annotation_id_regex, dro_iri, flybase_annotation_db),
-        (flybase_gene_iri, 'FlyBase', re.compile(r'(FBgn\d+)$'), dro_iri, flybase_gene_db),
-        (flybase_transcript_iri, 'EnsemblGenome_TRS', re.compile(r'(FBtr\d+)$'), dro_iri, flybase_transcript_db),
-        (ensembl_transcript_iri, 'Ensembl_TRS', re.compile(r'(ENST\d+)$'), homo_iri, ensembl_transcript_db),
-        (ensembl_gene_iri, 'Ensembl', re.compile(r'(ENSG\d+)$'), homo_iri, ensembl_gene_db),
+        (refseq_iri, 'RefSeq_NT', re.compile(r'^(NM_\d+)\.\d+$'), refseq_db),
+        (flybase_annotation_iri, 'UCSC', flybase_annotation_id_regex, flybase_annotation_db),
+        (flybase_gene_iri, 'FlyBase', re.compile(r'(FBgn\d+)$'), flybase_gene_db),
+        (flybase_transcript_iri, 'EnsemblGenome_TRS', re.compile(r'(FBtr\d+)$'), flybase_transcript_db),
+        (ensembl_transcript_iri, 'Ensembl_TRS', re.compile(r'(ENST\d+)$'), ensembl_transcript_db),
+        (ensembl_gene_iri, 'Ensembl', re.compile(r'(ENSG\d+)$'), ensembl_gene_db),
     ]
 
     graph = rdflib.Graph()
-    human_uniprots = set()
-    fly_uniprots = set()
-    uniprots_map = {homo_iri: human_uniprots, dro_iri: fly_uniprots}
+    uniprots = set()
 
     # id_iri makes an IRI/URI for the id.
     # id_type specifies what file has the uniprot to id mapping.
     # id_regex matches the specific ids in the file that we want, since some
-    # files have data for many kinds of ids or species.  Also used to select
-    # only part of an id.
-    # id_taxon is the IRI for the taxon of the ids we want from the file.
+    #   files have data for many kinds of ids or species.  Also used to select
+    #   only part of an id.
     # id_database is the IRI for the database of origin of the ids (e.g
-    # flybase genes use 'http://purl.example.com/database/flybase_gene').
-    for id_iri, id_type, id_regex, id_taxon, id_database in xref_data:
-        print 'Doing {} for {} in {}'.format(id_type, id_taxon, id_database)
+    #   flybase genes use 'http://purl.example.com/database/flybase_gene').
+    for id_iri, id_type, id_regex, id_database in xref_data:
+        print 'Doing {} in {}'.format(id_type, id_database)
         for uniprot, id_kind, mapped_id in gen_uniprot_id_mappings(id_type=id_type):
             m = id_regex.search(mapped_id)
             if not m:
@@ -1649,13 +2218,10 @@ def write_uniprot_rdf():
             mapped = id_iri(trimmed_id)
             graph.add((uni, see_also_pred, mapped))
             graph.add((mapped, db_pred, id_database))
-            graph.add((mapped, organism_pred, id_taxon))
-            uniprots_map[id_taxon].add(uni)
+            uniprots.add(uni)
 
-    for taxon, uniprots in uniprots_map.items():
-        for uni in uniprots:
-            graph.add((uni, organism_pred, taxon))
-            graph.add((uni, db_pred, uniprot_db))
+    for uni in uniprots:
+        graph.add((uni, db_pred, uniprot_db))
 
     with open(uniprot_rdf_path(), 'w') as outfh:
         outfh.write(graph.serialize(format='nt'))
@@ -1746,7 +2312,7 @@ def map_ids_to_uniprot(ids, id_type):
 
 #################################
 # VAN VACTOR / MCNEILL EXPERIMENT
-# MCNEILL SCREEN
+# ELIZABETH MCNEILL SCREEN
 
 def download_mcneill_screen():
     raise NotImplementedError()
@@ -2251,12 +2817,13 @@ def write_targetscan_rdf():
     human_mirbase_accs = set()
     human_refseqs = set()
 
-    # link family to fly gene target
     # converting fly symbol to flybase gene id
-    symbol_to_gene = targetscan_fly_symbol_to_gene()
+    fly_symbol_to_gene = targetscan_fly_symbol_to_gene()
+
+    # link family to fly gene target
     for family, symbol in gen_targetscan_fly_predicted_targets():
         fam = targetscan_mir_family_iri(family)
-        gene = flybase_gene_iri(symbol_to_gene[symbol])
+        gene = flybase_gene_iri(fly_symbol_to_gene[symbol])
         graph.add((fam, targets_pred, gene))
         families.add(fam)
         fly_genes.add(gene)
@@ -2991,9 +3558,13 @@ def workflow():
         write_mcneill_muscle_screen_rdf()
         write_microcosm_rdf()
         write_mirbase_rdf()
-        write_roundup_orthologs_rdf()
         write_synaptomedb_rdf()
         write_targetscan_rdf()
+
+        # Construct Roundup Orthologs from sparql.roundup.hms.harvard.edu
+        download_roundup_from_sparql()
+        # Or get them from the roundup text files from a raw data download
+        write_roundup_orthologs_rdf()
 
         # Get UniProt ID Mapping RDF from beta.sparql.uniprot.org.
         set_uniprot_version()
@@ -3008,27 +3579,32 @@ def workflow():
         # Or get UniProt ID Mapping RDF from idmapping.dat (UniProt ftp file.)
         # write_uniprot_rdf()
 
-        load_virtuoso_database()
+        load_rdf_database()
+
+        # PHASE I
+        write_targetscan_human_mirs_targeting_conserved_synapse_genes()
+        write_microcosm_human_mirs_targeting_conserved_synapse_genes()
+        write_overlap_between_microcosm_human_mirs_and_targetscan_human_mirs()
+        write_targetscan_fly_mirs_targeting_conserved_synapse_genes()
+        write_microcosm_fly_mirs_targeting_conserved_synapse_genes()
+        write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs()
+        write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs()
+        write_overlap_between_microcosm_fly_mirs_and_targetscan_fly_mirs()
+
+        # PHASE II
+        write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets()
+        write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes()
+        write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes()
+
+        write_conserved_synaptic_genes()
+        write_affymetrix_to_flybase_table()
+        write_human_to_fly_conserved_synapse_genes_table()
+
     else:
 
-        # download_uniprot_xrefs()
-        # load_affymetrix_fly_annotations_rdf()
-        # load_flybase_rdf()
-        # load_ibanez_5prime_mir_homologs_rdf()
-        # load_ibanez_fullseq_mir_homologs_rdf()
-        # load_mcneill_cns_screen_rdf()
-        # load_mcneill_muscle_screen_rdf()
-        # load_microcosm_rdf()
-        # load_mirbase_rdf()
-        # load_roundup_orthologs_rdf()
-        # load_synaptomedb_rdf()
-        # load_targetscan_rdf()
-        # load_uniprot_rdf()
-
-
+        write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs()
 
         pass
-
 
 
 
@@ -3046,19 +3622,6 @@ if __name__ == '__main__':
 
 #################
 # DEPRECATED CODE
-
-
-def stardog_json_query(query):
-    raise DeprecationWarning()
-    cmd = 'stardog --username {} --passwd {} query'.format(
-        secrets.stardog_user, secrets.stardog_password)
-    cmd += ' --format JSON'
-    cmd += ' "mirna;reasoning=QL"'
-    cmd += ' "' + query + '"'
-    print 'stardog_json_query()'
-    print cmd
-    out = subprocess.check_output(cmd, shell=True)
-    return json.loads(out)
 
 
 def ibanez_mir_homologs_rdf_path():
