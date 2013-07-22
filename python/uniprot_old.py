@@ -1,3 +1,18 @@
+import os
+import re
+
+import rdflib
+
+import config
+from mirna.flybase import flybase_annotation_id_regex
+from mirna.core import (db_pred, dro_iri, ensembl_gene_db, ensembl_gene_iri,
+                        ensembl_transcript_db, ensembl_transcript_iri,
+                        flybase_annotation_db, flybase_annotation_iri,
+                        flybase_gene_db, flybase_gene_iri,
+                        flybase_transcript_db, flybase_transcript_iri,
+                        homo_iri, organism_pred, refseq_db, refseq_iri,
+                        see_also_pred, uniprot_db, uniprot_iri)
+
 
 '''
 This code has been deprecated by extracting id mappings directly from
