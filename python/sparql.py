@@ -10,7 +10,11 @@ class Sparql:
     Like SPARQLWrapper, instances of this class issue requests to SPARQL
     endpoints and return the results.
     '''
-    def __init__(self, endpoint):
+    def __init__(self, endpoint, auth=None):
+        '''
+        auth: Requests HTTP authentication tuple
+        '''
+        self.auth = auth
         self.endpoint = endpoint
 
     def query(self, qry, accept=None):
@@ -47,8 +51,7 @@ class Sparql:
             headers = {'accept': accept}
         else:
             headers = {}
-        r = requests.get(url, params=params, headers=headers)
-        # , auth=('anonymous', 'anonymous'))
+        r = requests.get(url, params=params, headers=headers, auth=self.auth)
         r.raise_for_status()
         # Parse JSON for json response content types
         resp_ct = str(r.headers.get('content-type'))
