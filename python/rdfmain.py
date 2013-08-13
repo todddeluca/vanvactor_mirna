@@ -4,6 +4,7 @@ Contains code for creating a semantic database and querying it to answer Van Vac
 miRNA collaboration questions.
 '''
 
+import cStringIO
 import csv
 import itertools
 import json
@@ -24,7 +25,8 @@ import virtuoso
 import sparql
 from mirna import mcneill, ibanez
 from mirna.util import makedirs, map_flatten_set_list, call
-from mirna.core import (mirbase_id_iri, ensembl_gene_iri, get_nmj_rnai_genes)
+from mirna.core import (mirbase_id_iri, ensembl_gene_iri, dro_taxon,
+                        homo_taxon, mus_taxon, cel_taxon)
 from mirna.uniprot import (uniprot_fly_rdf_path,
                            uniprot_flybase_annotation_rdf_path,
                            uniprot_flybase_gene_rdf_path,
@@ -62,6 +64,7 @@ from mirna.roundup import (download_roundup_from_sparql, roundup_rdf_path,
                            roundup_sparql_rdf_path,
                            write_roundup_orthologs_rdf)
 from mirna.synaptomedb import (synaptomedb_v1_rdf_path, write_synaptomedb_rdf)
+from mirna.nmjrnai import get_nmj_rnai_genes
 
 
 
@@ -71,7 +74,7 @@ STARDOG_DB = 'stardog'
 DB_TYPE = STARDOG_DB
 virt7 = virtuoso.Virtuoso7(secrets.virtuoso_dba_password,
                            config.virtuoso_load_dir)
-sparq = sparql.Sparql(virt7.sparql_endpoint()) # used for querying
+virt_sparq = sparql.Sparql(virt7.sparql_endpoint()) # used for querying
 
 
 # Structure of a Dmel Transcript Annotation ID
@@ -95,12 +98,6 @@ homo = 'homo_sapiens'
 MICROCOSM = 'microcosm'
 TARGETSCAN = 'targetscan'
 
-
-# ncbi taxon ids for species
-mus_taxon = '10090'
-dro_taxon = '7227'
-cel_taxon = '6239'
-homo_taxon = '9606'
 
 # The seven mirs that were screened in muscle and CNS tissue to examine the
 # differential gene expression effects.
@@ -155,7 +152,7 @@ ibanez_full_sequence_ng = rdflib.URIRef('http://purl.example.com/graph/mirna_iba
 
 
 # taxons and pairs used for roundup orthologs
-taxmap = {dro: '7227', homo: '9606', mus: '10090', cel: '6239'}
+taxmap = {dro: dro_taxon, homo: homo_taxon, mus: mus_taxon, cel: cel_taxon}
 TAXON_TO_NAME = {cel_taxon: cel, dro_taxon: dro, homo_taxon: homo, mus_taxon: mus}
 # Orthologs between human and the other 3 species.
 ROUNDUP_PAIRS = [(dro_taxon, homo_taxon), (mus_taxon, homo_taxon), (cel_taxon, homo_taxon)]
@@ -187,30 +184,41 @@ def start_stardog():
     print 'stardog-admin --disable-security server start --username {} --passwd {}'.format(user, password)
 
 
-def stardog_json_query(query):
-    db_name = stardog_database_name()
-    # Include reasoning if inferring symmetrical edges.  Avoid it if
-    # symmetrical ortholog edges were loaded.
-    # db_name = '{};reasoning=QL'.format(stardog_database_name()),
+def stardog_sparql():
+    return sparql.Sparql(
+        'http://localhost:5822/{db}/query'.format(db=stardog_database_name()),
+        auth=(secrets.stardog_user, secrets.stardog_password))
 
-    cmd = ['stardog', 'query', 'execute', '--username', secrets.stardog_user,
-           '--passwd', secrets.stardog_password, '--format', 'JSON', db_name,
-           query]
-    print 'stardog_json_query()'
+
+def stardog_construct_query(query, deduplicate=True):
+    '''
+    Run a construct query and return (deduplicated) triples as N-triples.
+
+    :param query: a CONSTRUCT query string.
+    :param deduplicate: Stardog does not necessarily return deduplicated
+    triples from a construct query.  If deduplicate is True (the default),
+    duplicate triples will be removed.
+    '''
+    print 'stardog_construct_query'
     print query
-    out = subprocess.check_output(cmd)
-    try:
-        data = json.loads(out)
-    except ValueError:
-        sys.stdout.write(out)
-        raise
-    return data
+    out = stardog_sparql().query(query, accept='text/plain')
+    if deduplicate:
+        uniques = set(line for line in cStringIO.StringIO(out) if line.strip())
+        out = ''.join(uniques)
+    return out
+
+
+def stardog_json_query(query):
+    print 'stardog_json_query'
+    print query
+    return stardog_sparql().query(query, 
+                                 accept='application/sparql-results+json')
 
 
 def virtuoso_json_query(query):
     print 'virtuoso_json_query'
     print query
-    return sparq.query(query, accept='application/sparql-results+json')
+    return virt_sparq.query(query, accept='application/sparql-results+json')
 
 
 def sparql_json_query(query):
@@ -310,6 +318,25 @@ def drop_stardog_database():
     call(cmd)
 
 
+def stardog_drop_graph(graph):
+    cmd = 'time stardog data remove --username {} --passwd {}'.format(
+        secrets.stardog_admin_user, secrets.stardog_admin_password)
+    cmd += ' --named-graph {} {}'.format(graph, stardog_database_name())
+    call(cmd)
+
+
+def stardog_load_graph(filename, graph=None):
+    '''
+    :param graph: A named graph URI.  If None, use the default graph.
+    '''
+    cmd = 'time stardog data add --username {} --passwd {}'.format(
+        secrets.stardog_admin_user, secrets.stardog_admin_password)
+    if graph:
+        cmd += ' --named-graph {}'.format(graph)
+    cmd += ' {} {}'.format(stardog_database_name(), filename)
+    call(cmd)
+
+
 def load_stardog_database():
     '''
     Data is loaded when the database is created b/c loading is much faster
@@ -318,16 +345,14 @@ def load_stardog_database():
     cmd = 'time stardog-admin db create --username {} --passwd {}'.format(
         secrets.stardog_admin_user, secrets.stardog_admin_password)
     cmd += ' --name {}'.format(stardog_database_name())
-    # quickly bulk load data at database creation time
+    # Quickly bulk load data at database creation time.
+    # Bulk load quads if different graphs are required.
     # cmd += ' ' + ' '.join(all_rdf_paths())
     call(cmd)
 
+    # Load triples into different named graphs.
     for filename, graph in all_rdf_files_and_graphs():
-        cmd = 'time stardog data add --username {} --passwd {}'.format(
-            secrets.stardog_admin_user, secrets.stardog_admin_password)
-        cmd += ' --named-graph {} {} {}'.format(
-            graph, stardog_database_name(), filename)
-        call(cmd)
+        stardog_load_graph(filename, graph)
 
 
 def stardog_default_graph_rdf_files_and_graphs():
@@ -418,6 +443,253 @@ def load_rdf_database():
         raise Exception('Unrecognized DB_TYPE', DB_TYPE)
 
 
+###################
+# CONSTRUCT QUERIES
+#
+# Construct, save, and load edges that simplify the relationships in the
+# data and speed queries.
+
+
+def constructed_path(basename):
+    return os.path.join(config.datadir, 'constructed', basename)
+
+
+def count_lines(text):
+    count = 0
+    for line in cStringIO.StringIO(text):
+        count += 1
+    return count
+
+
+def construct_and_save(query, basename, approx_num_triples):
+    filename = constructed_path(basename)
+    nt = stardog_construct_query(query)
+    count = count_lines(nt)
+    print '{count} lines in CONSTRUCT result.'.format(count=count)
+    assert count >= approx_num_triples
+    with open(filename, 'w') as fh:
+        fh.write(nt)
+
+
+def construct_save_and_load(query, basename, graph, approx_num_triples):
+    filename = constructed_path(basename)
+    construct_and_save(query, filename)
+    # stardog_load_graph(filename, graph)
+
+
+def constructed_microcosm_fly_path():
+    fn = 'fly_microcosm-v5_mirbase_id_to_flybase_gene.nt'
+    return constructed_path(fn)
+
+
+def constructed_microcosm_human_path():
+    fn = 'human_microcosm-v5_mirbase_id_to_ensembl_gene.nt'
+    return constructed_path(fn)
+
+
+def constructed_targetscan_fly_path():
+    fn = 'fly_targetscan-6.2_mirbase_id_to_flybase_gene.nt'
+    return constructed_path(fn)
+
+
+def constructed_targetscan_human_path():
+    fn = 'human_targetscan-6.2_mirbase_id_to_ensembl_gene.nt'
+    return constructed_path(fn)
+
+
+def constructed_roundup_human_fly_orthologs_path():
+    fn = 'roundup-4_human_ensembl_gene_to_flybase_gene.nt'
+    return constructed_path(fn)
+
+
+def construct_targetscan_fly_mirna_id_to_gene_edges():
+    '''
+    Construct edges from current mirbase id to flybase gene
+    by going from current mirbase id to mirbase accession to
+    targetscan mir family to flybase gene.
+    '''
+    query = prefixes() + '''
+    CONSTRUCT { ?cmid mb:targets ?fg . }
+    WHERE {
+    # fly flybase genes
+    ?fg up:organism taxon:7227 .
+    ?fg up:database db:flybase_gene .
+    # targetscan mir family targeting fly genes
+    ?tmf mb:targets ?fg .
+    ?tmf up:database db:targetscan_mir_family .
+    # convert targetscan mir family to mature mirbase accs
+    ?tmf rdfs:seeAlso ?macc .
+    ?macc up:database db:mirbase_acc .
+    ?macc a mb:mature_mirna .
+    ?macc up:organism taxon:7227 .
+    # convert mirbase accs to current mirbase ids
+    ?macc mb:current_id ?cmid .
+    ?cmid up:database db:mirbase_id .
+    }
+    '''
+    fn = constructed_targetscan_fly_path()
+    approx_num_triples = 15000
+    construct_and_save(query, fn, approx_num_triples)
+
+
+def construct_targetscan_human_mirna_id_to_gene_edges():
+    '''
+    Construct edges from current mirbase id to ensembl gene
+    by going from current mirbase id to mirbase accession to
+    targetscan mir family to refseq transcript to uniprot to 
+    ensembl gene.
+    '''
+    query = prefixes() + '''
+    CONSTRUCT { ?cmid mb:targets ?heg . }
+    WHERE {
+    # human ensembl gene
+    ?heg up:organism taxon:9606 .
+    ?heg up:database db:ensembl_gene .
+    # human uniprot
+    ?hu rdfs:seeAlso ?heg .
+    ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
+    # human refseq transcript
+    ?hu rdfs:seeAlso ?ht .
+    ?ht up:database db:ncbi_refseq .
+    ?ht up:organism taxon:9606 .
+    # targetscan mir family targeting human refseq transcript
+    ?hmf mb:targets ?ht .
+    ?hmf up:database db:targetscan_mir_family .
+    # targetscan mir family to mature mirbase accs
+    ?hmf rdfs:seeAlso ?macc .
+    ?macc up:organism taxon:9606 .
+    ?macc up:database db:mirbase_acc .
+    ?macc a mb:mature_mirna .
+    # mirbase acc to current mirbase id
+    ?macc mb:current_id ?cmid .
+    ?cmid up:database db:mirbase_id .
+    }
+    '''
+    fn = constructed_targetscan_human_path()
+    approx_num_triples = 170000
+    construct_and_save(query, fn, approx_num_triples)
+
+
+def construct_microcosm_fly_mirna_id_to_gene_edges():
+    '''
+    Construct edges from current mirbase id to flybase gene
+    by going from current mirbase id to mirbase accession to
+    mirbase id to flybase annotation id to
+    '''
+    query = prefixes() + '''
+    CONSTRUCT { ?cmid mb:targets ?fbg . }
+    WHERE {
+    # fly mirbase id
+    ?mid up:database db:mirbase_id .
+    ?mid up:organism taxon:7227 .
+    # mirbase id to mature mirbase accession
+    ?macc mb:has_id ?mid .
+    ?macc a mb:mature_mirna .
+    ?macc up:database db:mirbase_acc .
+    # mirbase acc to current mirbase id
+    ?macc mb:current_id ?cmid .
+    ?cmid up:database db:mirbase_id .
+    ?cmid up:organism taxon:7227 .
+    # mirbase id to targeted flybase annotation ids
+    ?mid mb:targets ?fba .
+    ?fba up:database db:flybase_annotation .
+    # flybase annotation id to flybase transcript
+    ?fbt rdfs:seeAlso ?fba .
+    ?fbt up:database db:flybase_transcript .
+    # flybase transcript to uniprot
+    ?u rdfs:seeAlso ?fbt .
+    ?u up:database db:uniprot .
+    # uniprot to flybase gene .
+    ?u rdfs:seeAlso ?fbg .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    }
+    '''
+    fn = constructed_microcosm_fly_path()
+    approx_num_triples = 15000
+    construct_and_save(query, fn, approx_num_triples)
+
+
+def construct_microcosm_human_mirna_id_to_gene_edges():
+    '''
+    Construct edges from current mirbase id to ensembl gene
+    by going from current mirbase id to mirbase accession to
+    mirbase id to ensembl transcript to uniprot to ensembl gene.
+    '''
+    query = prefixes() + '''
+    CONSTRUCT { ?cmid mb:targets ?heg . }
+    WHERE {
+    # current human mirbase id to mirbase acc
+    ?macc mb:current_id ?cmid .
+    ?cmid up:database db:mirbase_id .
+    ?cmid up:organism taxon:9606 .
+    # mirbase id to mature mirbase accession
+    ?macc a mb:mature_mirna .
+    ?macc up:database db:mirbase_acc .
+    # mirbase id
+    ?macc mb:has_id ?mid .
+    ?mid up:database db:mirbase_id .
+    # mirbase id to targeted ensembl transcripts
+    ?mid mb:targets ?enst .
+    ?enst up:database db:ensembl_transcript .
+    # ensembl transcript to uniprot
+    ?u rdfs:seeAlso ?enst .
+    ?u up:database db:uniprot .
+    # uniprot to human ensembl gene .
+    ?u rdfs:seeAlso ?heg .
+    ?heg up:database db:ensembl_gene .
+    ?heg up:organism taxon:9606 .
+    }
+    '''
+    fn = constructed_microcosm_human_path()
+    approx_num_triples = 28000
+    construct_and_save(query, fn, approx_num_triples)
+
+
+
+def construct_roundup_human_gene_to_fly_gene_edges():
+    '''
+    Construct edges from human ensembl genes to flybase genes by going
+    from ensembl gene to human uniprot to fly uniprot to flybase gene.
+    '''
+    query = prefixes() + '''
+    CONSTRUCT {
+    ?heg obo:orthologous_to ?fbg .
+    ?fbg obo:orthologous_to ?heg .
+    }
+    WHERE {
+    # human - fly orthologs
+    ?hu up:organism taxon:9606 .
+    ?hu up:database db:uniprot .
+    ?du obo:orthologous_to ?hu .
+    ?du up:organism taxon:7227 .
+    ?du up:database db:uniprot .
+    # uniprot to human ensembl gene .
+    ?hu rdfs:seeAlso ?heg .
+    ?heg up:database db:ensembl_gene .
+    ?heg up:organism taxon:9606 .
+    # uniprot to flybase gene .
+    ?du rdfs:seeAlso ?fbg .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    }
+    '''
+    fn = constructed_roundup_human_fly_orthologs_path()
+    approx_num_triples = 10000
+    construct_and_save(query, fn, approx_num_triples)
+
+
+def load_constructed_edges():
+    pairs = [(constructed_microcosm_fly_path(), microcosm_ng),
+             (constructed_microcosm_human_path(), microcosm_ng),
+             (constructed_targetscan_fly_path(), targetscan_ng),
+             (constructed_targetscan_human_path(), targetscan_ng),
+             (constructed_roundup_human_fly_orthologs_path(), roundup_ng)]
+    for filename, graph in pairs:
+        stardog_load_graph(filename, graph)
+
+
 ################
 # SPARQL QUERIES
 
@@ -471,6 +743,26 @@ def update_validated_mirs_to_current_mirbase_ids():
     print current_mirs
     print len(current_mirs)
     return current_mirs
+
+
+def short_human_to_fly_conserved_synapse_genes_table():
+    '''
+    Return a list of tuples of human ensembl gene and flybase gene.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?heg ?fbg
+    WHERE {
+    # conserved synaptic genes
+    ?heg up:classifiedWith syndb:synaptic .
+    ?heg up:organism taxon:9606 .
+    ?heg up:database db:ensembl_gene .
+    ?heg obo:orthologous_to ?fbg .
+    ?fbg up:organism taxon:7227 .
+    ?fbg up:database db:flybase_gene .
+    }
+    '''
+    return query_for_id_tuples(query, ['heg', 'fbg'])
+
 
 
 def human_to_fly_conserved_synapse_genes_table():
@@ -602,6 +894,7 @@ def targetscan_human_mirs_targeting_conserved_synapse_genes():
     '''
     return query_for_ids(query, 'hm')
 
+
 def targetscan_fly_mirs_targeting_conserved_synapse_genes():
     '''
     Synapse genes are human genes from SynapseDB.
@@ -647,6 +940,35 @@ def targetscan_fly_mirs_targeting_conserved_synapse_genes():
     return query_for_ids(query, 'dm')
 
 
+def short_microcosm_human_mirs_targeting_conserved_synapse_genes():
+    '''
+    Return a list of human mirs that are predicted to target genes that are
+    synaptic genes (according the synapsedb) and orthologous to fly genes.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?cmid
+    WHERE {
+    # conserved synaptic genes
+    ?hg up:classifiedWith syndb:synaptic .
+    ?hg up:organism taxon:9606 .
+    ?hg up:database db:ensembl_gene .
+    ?hg obo:orthologous_to ?dg .
+    ?dg up:organism taxon:7227 .
+    ?dg up:database db:flybase_gene .
+    # current human mirbase ids targeting ensembl genes
+    GRAPH <''' + microcosm_ng + '''>
+    {
+    ?cmid mb:targets ?hg .
+    }
+    ?cmid up:database db:mirbase_id .
+    ?cmid up:organism taxon:9606 .
+    ?macc mb:current_id ?cmid .
+    }
+    '''
+    return query_for_ids(query, 'cmid')
+
+
+
 def microcosm_human_mirs_targeting_conserved_synapse_genes():
     '''
     Return a list of human mirs that are predicted to target genes that are
@@ -671,7 +993,7 @@ def microcosm_human_mirs_targeting_conserved_synapse_genes():
 
     # human ensembl transcripts
     ?hu rdfs:seeAlso ?ht .
-    ?ht up:database db:ensembl_transcript.
+    ?ht up:database db:ensembl_transcript .
     ?ht up:organism taxon:9606 .
 
     # microcosm mirbase ids targeting transcripts
@@ -1278,6 +1600,7 @@ def write_affymetrix_to_flybase_table():
     write_csv_file(affymetrix_to_flybase_table(), fn,
                    headers=('affymetrix_probeset_id', 'flybase_gene'))
 
+
 def write_human_to_fly_conserved_synapse_genes_table():
     dn = os.path.join(results_dir(), 'conserved_synapse_genes')
     fn = os.path.join(dn, 'human_to_fly_conserved_synapse_genes.csv')
@@ -1414,6 +1737,14 @@ def workflow():
 
         load_rdf_database()
 
+        # Simplify and speed queries by constructing edges between microRNAs
+        # and genes
+        construct_microcosm_human_mirna_id_to_gene_edges()
+        construct_microcosm_fly_mirna_id_to_gene_edges()
+        construct_targetscan_human_mirna_id_to_gene_edges()
+        construct_targetscan_fly_mirna_id_to_gene_edges()
+        load_constructed_edges()
+
         # PHASE I
         write_targetscan_human_mirs_targeting_conserved_synapse_genes()
         write_microcosm_human_mirs_targeting_conserved_synapse_genes()
@@ -1433,9 +1764,9 @@ def workflow():
         write_affymetrix_to_flybase_table()
         write_human_to_fly_conserved_synapse_genes_table()
 
-    else:
-
         write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs()
+
+    else:
 
         pass
 
