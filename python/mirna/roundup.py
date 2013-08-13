@@ -13,7 +13,7 @@ from mirna.core import (dro_iri, dro_taxon, homo_iri, homo_taxon,
 ###################
 # ROUNDUP FUNCTIONS
 
-def download_from_sparql():
+def download_roundup_from_sparql():
     qry = '''
     PREFIX up:<http://purl.uniprot.org/core/> 
     PREFIX taxon:<http://purl.uniprot.org/taxonomy/>
@@ -31,12 +31,12 @@ def download_from_sparql():
     }
     '''
     url = 'http://sparql.roundup.hms.harvard.edu:8890/sparql'
-    filename = sparql_rdf_path()
+    filename = roundup_sparql_rdf_path()
     makedirs(os.path.dirname(filename))
     return download_sparql_construct_rdf(qry, filename, endpoint=url)
 
 
-def gen_orthologs(query_taxon, subject_taxon, divergence='0.8', evalue='1e-5',
+def gen_roundup_orthologs(query_taxon, subject_taxon, divergence='0.8', evalue='1e-5',
                   version='4'):
     d = os.path.join(config.datadir, 'roundup', 'v' + version)
     path = os.path.join(d, 'roundup-{}-orthologs_for_{}_{}_{}_{}.txt'.format(
@@ -49,20 +49,20 @@ def gen_orthologs(query_taxon, subject_taxon, divergence='0.8', evalue='1e-5',
                 yield qid, sid, distance
 
 
-def sparql_rdf_path(taxon1='7227', taxon2='9606', version='qfo_2013_04'):
+def roundup_sparql_rdf_path(taxon1='7227', taxon2='9606', version='qfo_2013_04'):
     # lexicographically normalize taxons
     taxon1, taxon2 = sorted([taxon1, taxon2])
     d = os.path.join(config.datadir, 'roundup', version)
     return os.path.join(d, 'roundup-{}_{}-orthologs.nt'.format(taxon1, taxon2))
 
 
-def rdf_path(divergence='0.8', evalue='1e-5', version='4'):
+def roundup_rdf_path(divergence='0.8', evalue='1e-5', version='4'):
     d = os.path.join(config.datadir, 'roundup', 'v' + version)
     return os.path.join(d, 'roundup-{}-orthologs_{}_{}.nt'.format(
         version, divergence, evalue))
 
 
-def download_orthologs():
+def download_roundup_orthologs():
     raise NotImplementedError('''Go to http://roundup.hms.harvard.edu/download.
 Download Homo sapiens (9606) and Drosophila melanogaster (7227) 
 with a 0.8 divergence and 1e-5 evalue thresholds.
@@ -71,7 +71,7 @@ url but the Orchestra filesystem is melting down right now (2013/07/07).
 ''')
 
 
-def write_orthologs_rdf():
+def write_roundup_orthologs_rdf():
     '''
     For the input file for the given query taxon, subject taxon, divergence,
     evalue, and roundup version, write out a triple for each query id, subject
@@ -90,7 +90,7 @@ def write_orthologs_rdf():
 
     done_ids = set()
     graph = rdflib.Graph()
-    for qid, sid, distance in gen_orthologs(dro_taxon, homo_taxon,
+    for qid, sid, distance in gen_roundup_orthologs(dro_taxon, homo_taxon,
                                             divergence, evalue, version):
         q = uniprot_iri(qid)
         s = uniprot_iri(sid)
@@ -104,7 +104,7 @@ def write_orthologs_rdf():
             done_ids.add(sid)
 
     # n-triples file extension
-    with open(rdf_path(), 'w') as outfh:
+    with open(roundup_rdf_path(), 'w') as outfh:
         outfh.write(graph.serialize(format='nt'))
 
 

@@ -1,6 +1,6 @@
 
 
-import elementtree
+import xml.etree.ElementTree
 import os
 import re
 
@@ -94,7 +94,7 @@ def gen_flybase_transcript_mapping_file():
     count = 0
     print path
     # iterate over complete elements
-    for event, elem in elementtree.iterparse(path):
+    for event, elem in xml.etree.ElementTree.iterparse(path):
         if elem.tag == "transcript":
             # progress meter
             count += 1
@@ -162,7 +162,7 @@ def make_flybase_transcript_mapping_file():
         fh.write('# Derived from the reporting-xml FBtr.xml file.\n')
         fh.write('# Tab-separated fields: organism_abbreviation, flybase_transcript_id, flybase_annotation_id\n')
 
-        for event, elem in elementtree.iterparse(path):
+        for event, elem in xml.etree.ElementTree.iterparse(path):
             if event == 'end' and elem.tag == "transcript":
                 count += 1
                 if count % 1000 == 0:

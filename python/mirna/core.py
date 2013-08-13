@@ -7,6 +7,13 @@ import urllib
 import rdflib
 
 
+# ncbi taxon ids for species
+cel_taxon = '6239'
+mus_taxon = '10090'
+dro_taxon = '7227'
+homo_taxon = '9606'
+
+
 # RDF URIs and URI generators
 # Real Entities
 dro_iri = rdflib.URIRef('http://purl.uniprot.org/taxonomy/7227')

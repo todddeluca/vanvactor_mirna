@@ -29,11 +29,11 @@ def aliases_filename():
     return aliases_dest().rstrip('.gz')
 
 
-def rdf_path():
+def mirbase_rdf_path():
     return os.path.join(config.datadir, 'mirbase', '19', 'mirbase.nt')
 
 
-def download_aliases():
+def download_mirbase_aliases():
 
     url = aliases_url()
     dest = aliases_dest()
@@ -41,7 +41,7 @@ def download_aliases():
     call('gunzip {}'.format(dest))
 
 
-def write_rdf():
+def write_mirbase_rdf():
     print 'write_rdf'
     graph = rdflib.Graph()
     human_accs = set()

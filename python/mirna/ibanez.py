@@ -6,10 +6,8 @@ import os
 import rdflib
 
 import config
-from mirna.core import (db_pred, dro_iri, gen_ibanez_fly_human_homologs,
-                        homo_iri, homologous_to_pred, ibanez_five_prime_ng,
-                        ibanez_full_sequence_ng, mirbase_id_db, mirbase_id_iri,
-                        organism_pred)
+from mirna.core import (db_pred, dro_iri, homo_iri, homologous_to_pred,
+                        mirbase_id_db, mirbase_id_iri, organism_pred)
 
 
 # The two methods used to infer homology in the 2008 Ibanez-Ventoso paper.
@@ -138,68 +136,6 @@ def print_fly_human_homologs():
     '''
     for dro_mir, homo_mir, method in gen_fly_human_homologs():
         print method, dro_mir, homo_mir
-
-
-
-#################
-# DEPRECATED CODE
-
-
-def ibanez_mir_homologs_rdf_path():
-    raise DeprecationWarning()
-    return os.path.join(config.datadir, 'ibanez', '2008', 'ibanez-2008-mir-homologs.trix')
-
-
-def write_ibanez_mir_homologs_rdf():
-    raise DeprecationWarning()
-    ds = rdflib.Dataset()
-
-    five_prime_graph = ds.graph(ibanez_five_prime_ng)
-    make_ibanez_mir_homologs_method_graph(FIVE_PRIME, five_prime_graph)
-
-    full_seq_graph = ds.graph(ibanez_full_sequence_ng)
-    make_ibanez_mir_homologs_method_graph(FULL_SEQ, full_seq_graph)
-
-    with open(ibanez_mir_homologs_rdf_path(), 'w') as outfh:
-        outfh.write(ds.serialize(format='trix'))
-
-
-def make_ibanez_mir_homologs_method_graph(method, graph):
-    '''
-    Write the homologs for a specific method to a
-    method: 'five__prime_sequence_homolog' or '70_percent_full_sequence_homolog'
-    '''
-    raise DeprecationWarning()
-
-    print 'Populating graph for Ibanez 2008 miR fly-human homologs for method {}'.format(method)
-    fly_mirs = set()
-    human_mirs = set()
-
-    for fly_mir_id, human_mir_id, meth in gen_ibanez_fly_human_homologs():
-        if meth != method:
-            continue
-
-        fly_mir = mirbase_id_iri(fly_mir_id)
-        human_mir = mirbase_id_iri(human_mir_id)
-        graph.add((fly_mir, homologous_to_pred, human_mir))
-
-        # Examine whether there is a many-to-many mapping of these mirs
-        if fly_mir in fly_mirs:
-            print 'fly mir appears twice', fly_mir_id, human_mir_id, method
-        if human_mir in human_mirs:
-            print 'human mir appears twice', fly_mir_id, human_mir_id, method
-
-        fly_mirs.add(fly_mir)
-        human_mirs.add(human_mir)
-
-    for mir in fly_mirs:
-        graph.add((mir, db_pred, mirbase_id_db))
-        graph.add((mir, organism_pred, dro_iri))
-
-    for mir in human_mirs:
-        graph.add((mir, db_pred, mirbase_id_db))
-        graph.add((mir, organism_pred, homo_iri))
-
 
 
 
