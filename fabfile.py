@@ -39,7 +39,6 @@ import prod as secrets
 # Stardog database data and license key live in STARDOG_HOME
 stardog_version = '1.2.3'
 stardog_name = 'stardog-{}'.format(stardog_version)
-stardog_home = '/home/ubuntu/data/stardog'
 
 
 ###############
@@ -64,6 +63,7 @@ def local():
     config.deploy_env = 'local'
     config.proj = os.path.expanduser('~/deploy/vanvactor_mirna')
     config.system_python = '/usr/local/bin/python'
+    config.stardog_home = os.path.expanduser('~/data/stardog')
     post_config(config)
 
 
@@ -76,8 +76,9 @@ def prod():
     env.user = 'ubuntu'
     env.key_filename = os.path.expanduser('~/.ssh/tfd_20120531.pem')
     config.deploy_env = 'prod'
-    config.proj = os.path.expanduser('/home/ubuntu/deploy/vanvactor_mirna')
+    config.proj = '/home/ubuntu/deploy/vanvactor_mirna'
     config.system_python = '/usr/bin/python'
+    config.stardog_home = '/home/ubuntu/data/stardog'
     post_config(config)
 
 
@@ -152,7 +153,7 @@ def install_stardog():
     '''
     # STARDOG_HOME tells stardog where its data files, etc., are.
     fabric.contrib.files.append(
-        '~/.bash_profile', 'export STARDOG_HOME="{}"'.format(stardog_home))
+        '~/.bash_profile', 'export STARDOG_HOME="{}"'.format(config.stardog_home))
 
     sd = stardog_name
 
@@ -168,9 +169,9 @@ def install_stardog():
     sudo('ln -s /usr/local/{sd}/stardog /usr/local/{sd}/stardog-admin /usr/local/bin'.format(sd=sd))
 
     # Create STARDOG_HOME dir for stardog data
-    run('mkdir -p {}'.format(stardog_home))
+    run('mkdir -p {}'.format(config.stardog_home))
     # Add license key to STARDOG_HOME so stardog will work.
-    put('installs/{sd}/stardog-license-key.bin'.format(sd=sd), stardog_home)
+    put('installs/{sd}/stardog-license-key.bin'.format(sd=sd), config.stardog_home)
 
     # Change default password for default admin user to something not published
     # on the web
@@ -187,7 +188,7 @@ def install_stardog():
 @task
 def conf_stardog():
     put(os.path.join(HERE, 'conf', stardog_name, 'stardog.properties'),
-        stardog_home)
+        config.stardog_home)
 
 @task
 def uninstall_stardog():
@@ -202,7 +203,7 @@ def uninstall_stardog_home():
     '''
     Remove STARDOG_HOME dir, including all stardog database files!
     '''
-    sudo('rm -rf {}'.format(stardog_home))
+    sudo('rm -rf {}'.format(config.stardog_home))
 
 
 
