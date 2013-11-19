@@ -2,6 +2,15 @@
 '''
 Contains code for creating a semantic database and querying it to answer Van Vactor
 miRNA collaboration questions.
+
+
+The "short_" prefix indicates sparql queries based on the simplified edges that
+map mirbase id to gene (mir target prediction), gene to gene (orthology), and
+mirbase id to mirbase id (homology)
+
+The "merged_" prefix indicates sparql queries that combine targets for
+microcosm and targetscan and for ibanez five-prime and full-sequence homology
+methods.
 '''
 
 import cStringIO
@@ -17,6 +26,7 @@ import datetime
 import functools
 
 import rdflib
+import requests.exceptions
 
 import config
 import secrets
@@ -97,7 +107,8 @@ homo = 'homo_sapiens'
 # mirna target prediction databases
 MICROCOSM = 'microcosm'
 TARGETSCAN = 'targetscan'
-
+targets_dbs = [MICROCOSM, TARGETSCAN]
+MERGED = 'merged' # both prediction databases
 
 # The seven mirs that were screened in muscle and CNS tissue to examine the
 # differential gene expression effects.
@@ -158,8 +169,9 @@ TAXON_TO_NAME = {cel_taxon: cel, dro_taxon: dro, homo_taxon: homo, mus_taxon: mu
 ROUNDUP_PAIRS = [(dro_taxon, homo_taxon), (mus_taxon, homo_taxon), (cel_taxon, homo_taxon)]
 
 IBANEZ_METHOD_TO_NG = {ibanez.FIVE_PRIME: ibanez_five_prime_ng,
-                          ibanez.FULL_SEQ: ibanez_full_sequence_ng,
-                         }
+                       ibanez.FULL_SEQ: ibanez_full_sequence_ng}
+ibanez_methods = [ibanez.FIVE_PRIME, ibanez.FULL_SEQ]
+TARGETS_DB_TO_NG = {MICROCOSM: microcosm_ng, TARGETSCAN: targetscan_ng}
 
 
 ##############################
@@ -211,8 +223,16 @@ def stardog_construct_query(query, deduplicate=True):
 def stardog_json_query(query):
     print 'stardog_json_query'
     print query
-    return stardog_sparql().query(query, 
-                                 accept='application/sparql-results+json')
+    try:
+        return stardog_sparql().query(query,
+                                      accept='application/sparql-results+json')
+    except requests.exceptions.HTTPError as e:
+        print e
+        print dir(e)
+        print vars(e)
+        print vars(e.response)
+        print e.response.content
+        raise
 
 
 def virtuoso_json_query(query):
@@ -502,6 +522,16 @@ def constructed_roundup_human_fly_orthologs_path():
     return constructed_path(fn)
 
 
+def constructed_ibanez_five_prime_path():
+    fn = 'ibanez-2008-five_prime-current-mirbase-homologs.nt'
+    return constructed_path(fn)
+
+
+def constructed_ibanez_fullseq_path():
+    fn = 'ibanez-2008-fullseq-current-mirbase-homologs.nt'
+    return constructed_path(fn)
+
+
 def construct_targetscan_fly_mirna_id_to_gene_edges():
     '''
     Construct edges from current mirbase id to flybase gene
@@ -680,12 +710,81 @@ def construct_roundup_human_gene_to_fly_gene_edges():
     construct_and_save(query, fn, approx_num_triples)
 
 
+def construct_ibanez_fullseq_edges():
+    query = prefixes() + '''
+    CONSTRUCT {
+    ?dcmid obo:homologous_to ?hcmid .
+    }
+    WHERE {
+    # homologous mirbase ids
+    GRAPH <''' + ibanez_full_sequence_ng + '''> {
+        ?dmid obo:homologous_to ?hmid .
+    }
+    # current mirbase id for fly
+    ?dmid up:database db:mirbase_id .
+    ?dmacc mb:has_id ?dmid .
+    ?dmacc a mb:mature_mirna .
+    ?dmacc up:database db:mirbase_acc .
+    ?dmacc mb:current_id ?dcmid .
+    ?dcmid up:database db:mirbase_id .
+    ?dcmid up:organism taxon:7227 .
+    # current mirbase id for human
+    ?hmid up:database db:mirbase_id .
+    ?hmacc mb:has_id ?hmid .
+    ?hmacc a mb:mature_mirna .
+    ?hmacc up:database db:mirbase_acc .
+    ?hmacc mb:current_id ?hcmid .
+    ?hcmid up:database db:mirbase_id .
+    ?hcmid up:organism taxon:9606 .
+    }
+    '''
+    fn = constructed_ibanez_fullseq_path()
+    approx_num_triples = 50
+    construct_and_save(query, fn, approx_num_triples)
+
+
+def construct_ibanez_five_prime_edges():
+    query = prefixes() + '''
+    CONSTRUCT {
+    ?dcmid obo:homologous_to ?hcmid .
+    }
+    WHERE {
+    # homologous mirbase ids
+    GRAPH <''' + ibanez_five_prime_ng + '''> {
+        ?dmid obo:homologous_to ?hmid .
+    }
+    # current mirbase id for fly
+    ?dmid up:database db:mirbase_id .
+    ?dmacc mb:has_id ?dmid .
+    ?dmacc a mb:mature_mirna .
+    ?dmacc up:database db:mirbase_acc .
+    ?dmacc mb:current_id ?dcmid .
+    ?dcmid up:database db:mirbase_id .
+    ?dcmid up:organism taxon:7227 .
+    # current mirbase id for human
+    ?hmid up:database db:mirbase_id .
+    ?hmacc mb:has_id ?hmid .
+    ?hmacc a mb:mature_mirna .
+    ?hmacc up:database db:mirbase_acc .
+    ?hmacc mb:current_id ?hcmid .
+    ?hcmid up:database db:mirbase_id .
+    ?hcmid up:organism taxon:9606 .
+    }
+    '''
+    fn = constructed_ibanez_five_prime_path()
+    approx_num_triples = 50
+    construct_and_save(query, fn, approx_num_triples)
+
+
 def load_constructed_edges():
     pairs = [(constructed_microcosm_fly_path(), microcosm_ng),
              (constructed_microcosm_human_path(), microcosm_ng),
              (constructed_targetscan_fly_path(), targetscan_ng),
              (constructed_targetscan_human_path(), targetscan_ng),
-             (constructed_roundup_human_fly_orthologs_path(), roundup_ng)]
+             (constructed_roundup_human_fly_orthologs_path(), roundup_ng),
+             (constructed_ibanez_five_prime_path(), ibanez_five_prime_ng),
+             (constructed_ibanez_fullseq_path(), ibanez_full_sequence_ng),
+            ]
     for filename, graph in pairs:
         stardog_load_graph(filename, graph)
 
@@ -705,7 +804,7 @@ def update_mirbase_ids(mirbase_ids):
     mirbase id if it is up-to-date.
     '''
     # Generate URIs for the mirbase ids
-    mids = [mirbase_id_iri(mirbase_id) for mirbase_id in mirbase_ids + ['foobar']]
+    mids = [mirbase_id_iri(mirbase_id) for mirbase_id in mirbase_ids]
     # Query for a mapping from original id to current id
     query = prefixes() + '''
     SELECT DISTINCT ?dm_old ?dm
@@ -713,13 +812,13 @@ def update_mirbase_ids(mirbase_ids):
     VALUES ?dm_old { ''' + ' '.join(['<{}>'.format(mid) for mid in mids]) + ''' }
     # convert old mirbase ids to mirbase accs
     ?dma mb:has_id ?dm_old .
+    # FILTER ?dm_old IN ( ''' + ', '.join('<{}>'.format(mid) for mid in mids) + ''' )
     ?dm_old up:database db:mirbase_id .
     # convert mirbase accs to current mirbase ids
     ?dma up:database db:mirbase_acc .
     ?dma a mb:mature_mirna .
     ?dma mb:current_id ?dm .
     }
-    "
     '''
     result = sparql_json_query(query)
     # iris are like u'http://purl.targetscan.org/mir_family/miR-33'
@@ -743,6 +842,230 @@ def update_validated_mirs_to_current_mirbase_ids():
     print current_mirs
     print len(current_mirs)
     return current_mirs
+
+
+def merged_fly_mir_targets_query_sub(mirbase_id, where):
+    current_mirbase_id = update_mirbase_ids([mirbase_id])[mirbase_id]
+    mir = mirbase_id_iri(current_mirbase_id)
+    query = prefixes() + '''
+    SELECT DISTINCT ?fbg
+    WHERE {
+    ''' + where(mir) + '''
+    }
+    '''
+    return query_for_ids(query, 'fbg')
+
+
+def merged_fly_mir_targets_where(mir):
+    return '''
+    # flybase genes targeted by this mirbase id
+    ?dmid mb:targets ?fbg .
+    FILTER ( ?dmid = <''' + mir + '''> )
+    ?dmid up:database db:mirbase_id .
+    ?dmid up:organism taxon:7227 .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    '''
+
+
+def merged_conserved_fly_mir_targets_where(mir):
+    return merged_fly_mir_targets_where(mir) + '''
+    # conserved in human
+    ?heg obo:orthologous_to ?fbg .
+    ?heg up:database db:ensembl_gene .
+    ?heg up:organism taxon:9606 .
+    '''
+
+
+def merged_conserved_synaptic_fly_mir_targets_where(mir):
+    return merged_conserved_fly_mir_targets_where(mir) + '''
+    # synaptic gene
+    ?heg up:classifiedWith syndb:synaptic .
+    '''
+
+
+def merged_conserved_synaptic_fly_targets(mirbase_id):
+    '''
+    Return the flybase genes that are conserved in human and targeted by
+    `mirbase_id` in the predicted targets databases.
+    '''
+    return merged_fly_mir_targets_query_sub(
+        mirbase_id, merged_conserved_synaptic_fly_mir_targets_where)
+
+
+def merged_conserved_fly_targets(mirbase_id):
+    '''
+    Return the flybase genes that are conserved in human and targeted by
+    `mirbase_id` in the predicted targets databases.
+    '''
+    return merged_fly_mir_targets_query_sub(
+        mirbase_id, merged_conserved_fly_mir_targets_where)
+
+
+def merged_fly_targets(mirbase_id):
+    '''
+    Return the flybase genes targeted by `mirbase_id` in the predicted targets
+    databases.
+    '''
+    return merged_fly_mir_targets_query_sub(
+        mirbase_id, merged_fly_mir_targets_where)
+
+
+def conserved_genes_where():
+    return '''
+    # conserved genes
+    ?heg up:database db:ensembl_gene .
+    ?heg up:organism taxon:9606 .
+    ?heg obo:orthologous_to ?fbg .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    '''
+
+
+def conserved_synaptic_genes_where():
+    return conserved_genes_where() + '''
+    # synaptic genes
+    ?heg up:classifiedWith syndb:synaptic .
+    '''
+
+
+def short_human_mirs_targeting_conserved_synapse_genes(targets_db):
+    '''
+    Return a list of human mirs that are predicted to target genes that are
+    synaptic genes (according the synapsedb) and orthologous to fly genes.
+    '''
+    targets_ng = TARGETS_DB_TO_NG[targets_db]
+    query = prefixes() + '''
+    SELECT DISTINCT ?cmid
+    WHERE {
+    ''' + conserved_synaptic_genes_where() + '''
+    # current human mirbase ids targeting ensembl genes
+    GRAPH <''' + targets_ng + '''>
+    {
+    ?cmid mb:targets ?heg .
+    }
+    ?cmid up:database db:mirbase_id .
+    ?cmid up:organism taxon:9606 .
+    ?macc mb:current_id ?cmid .
+    }
+    '''
+    return query_for_ids(query, 'cmid')
+
+
+
+def short_fly_mirs_targeting_conserved_synapse_genes(targets_db):
+    '''
+    Return a list of fly mirs that are predicted to target genes that are
+    orthologous to human synaptic genes (according the synapsedb).
+    '''
+    targets_ng = TARGETS_DB_TO_NG[targets_db]
+    query = prefixes() + '''
+    SELECT DISTINCT ?cmid
+    WHERE {
+    ''' + conserved_synaptic_genes_where() + '''
+    # current fly mirbase ids targeting flybase genes
+    GRAPH <''' + targets_ng + '''>
+    {
+    ?cmid mb:targets ?fbg .
+    }
+    ?cmid up:database db:mirbase_id .
+    ?cmid up:organism taxon:7227 .
+    ?macc mb:current_id ?cmid .
+    }
+    '''
+    return query_for_ids(query, 'cmid')
+
+
+def short_mirs_targeting_conserved_synapse_genes(targets_db, species):
+    '''
+    Return a list of mirs that are predicted to target genes that are
+    conserved synaptic genes (according the synaptomedb and roundup).
+    '''
+    taxon = taxmap[species]
+    query = prefixes() + '''
+    SELECT DISTINCT ?cmid
+    WHERE {
+    ''' + conserved_synaptic_genes_where() + '''
+    ''' + targets_in_graph_where(targets_db, species) + '''
+    ?cmid up:database db:mirbase_id .
+    ?macc mb:current_id ?cmid .
+    ?cmid up:organism taxon:''' + taxon + ''' .
+    }
+    '''
+    return query_for_ids(query, 'cmid')
+
+
+def targets_in_graph_where(targets_db, species):
+    '''
+    Return a graph pattern that matches `?cmid mb:targets ?heg .` or 
+    `?cmid mb:tagets ?fbg .`, possibly wrapped in a named graph stanza.
+    If targets_db is MICROCOSM, use the microcosm graph, if it is TARGETSCAN,
+    use the targetscan graph, and if it is MERGED, do not wrap clause in
+    a graph.
+    e.g.
+    GRAPH <http://example.com/my_named_graph>
+    {
+    ?cmid mb:targets ?fbg .
+    }
+
+    species: dro or homo.
+    targets_db: MICROCOSM, TARGETSCAN, or MERGED.
+    '''
+    if species == dro:
+        gene_var = '?fbg'
+    elif species == homo:
+        gene_var = '?heg'
+    else:
+        raise Exception('Unknown species.', species)
+    cmid_clause = '''
+    # current mirbase ids targeting genes
+    ?cmid mb:targets ''' + gene_var + ''' .
+    '''
+
+    if targets_db == MERGED:
+        return cmid_clause
+    elif targets_db in targets_dbs:
+        targets_ng = TARGETS_DB_TO_NG[targets_db]
+        where = 'GRAPH <' + targets_ng + '> {\n'
+        where += cmid_clause
+        where += '}\n'
+        return where
+    else:
+        raise Exception('Unknown targets_db.', targets_db)
+
+
+def merged_human_mirs_targeting_conserved_synapse_genes():
+    '''
+    Return human mirbase ids predicted to target a conserved synapse gene.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?hmid
+    WHERE {
+    # human mirbase ids targeting human ensembl genes
+    ?hmid mb:targets ?heg .
+    ?hmid up:database db:mirbase_id .
+    ?hmid up:organism taxon:9606 .
+    ''' + conserved_synaptic_genes_where() + '''
+    }
+    '''
+    return query_for_ids(query, 'hmid')
+
+
+def merged_fly_mirs_targeting_conserved_synapse_genes():
+    '''
+    Return fly mirbase ids predicted to target a conserved synapse gene.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?dmid
+    WHERE {
+    # fly mirbase ids targeting flybase genes
+    ?dmid mb:targets ?fbg .
+    ?dmid up:database db:mirbase_id .
+    ?dmid up:organism taxon:7227 .
+    ''' + conserved_synaptic_genes_where() + '''
+    }
+    '''
+    return query_for_ids(query, 'dmid')
 
 
 def short_human_to_fly_conserved_synapse_genes_table():
@@ -822,6 +1145,7 @@ def human_conserved_synapse_genes():
     '''
     return query_for_ids(query, 'heg')
 
+
 def fly_conserved_synapse_genes():
     '''
     Synapse genes are human genes from SynapseDB.
@@ -850,6 +1174,7 @@ def fly_conserved_synapse_genes():
     }
     '''
     return query_for_ids(query, 'dg')
+
 
 def targetscan_human_mirs_targeting_conserved_synapse_genes():
     '''
@@ -940,35 +1265,6 @@ def targetscan_fly_mirs_targeting_conserved_synapse_genes():
     return query_for_ids(query, 'dm')
 
 
-def short_microcosm_human_mirs_targeting_conserved_synapse_genes():
-    '''
-    Return a list of human mirs that are predicted to target genes that are
-    synaptic genes (according the synapsedb) and orthologous to fly genes.
-    '''
-    query = prefixes() + '''
-    SELECT DISTINCT ?cmid
-    WHERE {
-    # conserved synaptic genes
-    ?hg up:classifiedWith syndb:synaptic .
-    ?hg up:organism taxon:9606 .
-    ?hg up:database db:ensembl_gene .
-    ?hg obo:orthologous_to ?dg .
-    ?dg up:organism taxon:7227 .
-    ?dg up:database db:flybase_gene .
-    # current human mirbase ids targeting ensembl genes
-    GRAPH <''' + microcosm_ng + '''>
-    {
-    ?cmid mb:targets ?hg .
-    }
-    ?cmid up:database db:mirbase_id .
-    ?cmid up:organism taxon:9606 .
-    ?macc mb:current_id ?cmid .
-    }
-    '''
-    return query_for_ids(query, 'cmid')
-
-
-
 def microcosm_human_mirs_targeting_conserved_synapse_genes():
     '''
     Return a list of human mirs that are predicted to target genes that are
@@ -1010,7 +1306,6 @@ def microcosm_human_mirs_targeting_conserved_synapse_genes():
     }
     '''
     return query_for_ids(query, 'hm')
-
 
 
 def microcosm_fly_mirs_targeting_conserved_synapse_genes():
@@ -1058,42 +1353,6 @@ def microcosm_fly_mirs_targeting_conserved_synapse_genes():
     return query_for_ids(query, 'dm')
 
 
-def microcosm_predicted_human_mir_targets(mirbase_id):
-    '''
-    Given a mirbase id, go to mature mirbase accession, to mirbase ids
-    associated with that accession, to ensembl transcript targets to uniprot
-    to ensembl genes.
-    '''
-    mir = mirbase_id_iri(mirbase_id)
-    query = prefixes() + '''
-    SELECT DISTINCT ?gene
-    WHERE {{
-    # original mirbase id to mature mirbase accession
-    ?macc mb:has_id <{mid_orig}> .
-    ?macc a mb:mature_mirna .
-    ?macc up:database db:mirbase_acc .
-
-    # mirbase acc to all mirbase ids
-    ?macc mb:has_id ?mid .
-    ?mid up:database db:mirbase_id .
-
-    # mirbase id to targeted ensembl transcripts
-    ?mid mb:targets ?enst .
-    ?enst up:database db:ensembl_transcript .
-
-    # ensembl transcript to uniprot
-    ?u rdfs:seeAlso ?enst .
-    ?u up:database db:uniprot .
-
-    # uniprot to human ensembl gene .
-    ?u rdfs:seeAlso ?gene .
-    ?gene up:database db:ensembl_gene .
-    ?gene up:organism taxon:9606 .
-    }}
-    '''.format(mid_orig=mir)
-    return query_for_ids(query, 'gene')
-
-
 def microcosm_predicted_fly_mir_targets(mirbase_id):
     '''
     Given a mirbase id, go to a mature mirbase accession and back to mirbase
@@ -1135,41 +1394,6 @@ def microcosm_predicted_fly_mir_targets(mirbase_id):
     return query_for_ids(query, 'gene')
 
 
-def targetscan_predicted_human_mir_targets(mirbase_id):
-    '''
-    Given a mirbase id, go to a mature mirbase accession, to a targetscan mir
-    family, to predicted targeted refseq to uniprot to ensembl gene.
-    '''
-    mir = mirbase_id_iri(mirbase_id)
-    query = prefixes() + '''
-    SELECT DISTINCT ?gene
-    WHERE {{
-    # original mirbase id to mature mirbase accession
-    ?macc mb:has_id <{mid_orig}> .
-    ?macc a mb:mature_mirna .
-    ?macc up:database db:mirbase_acc .
-
-    # mirbase acc to targetscan mir family
-    ?tmf rdfs:seeAlso ?macc .
-    ?tmf up:database db:targetscan_mir_family .
-
-    # targetscan mir family to targeted refseq transcripts
-    ?tmf mb:targets ?ref .
-    ?ref up:database db:ncbi_refseq .
-
-    # refseq to uniprot
-    ?u rdfs:seeAlso ?ref .
-    ?u up:database db:uniprot .
-
-    # uniprot to human ensembl gene .
-    ?u rdfs:seeAlso ?gene .
-    ?gene up:database db:ensembl_gene .
-    ?gene up:organism taxon:9606 .
-    }}
-    '''.format(mid_orig=mir)
-    return query_for_ids(query, 'gene')
-
-
 def targetscan_predicted_fly_mir_targets(mirbase_id):
     '''
     Given a mirbase id, go to a mature mirbase accession, to a targetscan mir family,
@@ -1197,201 +1421,133 @@ def targetscan_predicted_fly_mir_targets(mirbase_id):
     return query_for_ids(query, 'gene')
 
 
-def human_homologs_of_fly_mir(mirbase_id, ibanez_method):
-    mir = mirbase_id_iri(mirbase_id)
-    query = prefixes() + '''
-    SELECT DISTINCT ?hmid
-    WHERE {{
-    # original mirbase id to mature mirbase accession
-    ?macc mb:has_id <{mid_orig}> .
-    ?macc a mb:mature_mirna .
-    ?macc up:database db:mirbase_acc .
 
-    # mirbase acc to all fly mirbase ids
-    ?macc mb:has_id ?mid .
-    ?mid up:database db:mirbase_id .
-    ?mid up:organism taxon:7227 .
-
-    GRAPH <{ibanez_method}> {{
-        ?mid obo:homologous_to ?hmid_old .
-    }}
-
-    # human mirbase id
-    ?hmid_old up:organism taxon:9606 .
-    ?hmid_old up:database db:mirbase_id .
-
-    # update mirbase id to current mirbase id
-    ?hmacc mb:has_id ?hmid_old .
-    ?hmacc up:database db:mirbase_acc .
-    ?hmacc a mb:mature_mirna .
-    ?hmacc mb:current_id ?hmid .
-    ?hmid up:database db:mirbase_id .
-    ?hmid up:organism taxon:9606 .
-    }}
-    '''.format(mid_orig=mir,
-               ibanez_method=IBANEZ_METHOD_TO_NG[ibanez_method])
-    return query_for_ids(query, 'hmid')
+def short_conserved_fly_targets_of_mirs(mirbase_ids, targets_db):
+    return map_flatten_set_list(short_conserved_fly_targets, mirbase_ids, 
+                                [targets_db] * len(mirbase_ids))
 
 
-def targets_of_mirs(mirbase_ids, species, db):
+
+def short_conserved_fly_targets(mirbase_id, targets_db):
     '''
-    Return a list of the union of all the targets of the mirnas in mirbase_ids,
-    for the given species and database.
-
-    db: MICROCOSM or TARGETSCAN
-    species: homo or mus
-    mirbase_ids: a list.
+    Return the flybase genes that are conserved in human and targeted by
+    `mirbase_id` in the predicted targets database `targets_db`.
     '''
-    func_map = {(homo, MICROCOSM): microcosm_predicted_human_mir_targets,
-                (homo, TARGETSCAN): targetscan_predicted_human_mir_targets,
-                (dro, MICROCOSM): microcosm_predicted_fly_mir_targets,
-                (dro, TARGETSCAN): targetscan_predicted_fly_mir_targets,}
-    return map_flatten_set_list(func_map[(species, db)], mirbase_ids)
-
-
-def fly_orthologs_of_targetscan_targets_of_human_mirs_homologous_to_fly_mir(
-    mirbase_id, ibanez_method):
-    '''
-    '''
-    mir = mirbase_id_iri(mirbase_id)
+    current_mirbase_id = update_mirbase_ids([mirbase_id])[mirbase_id]
+    mir = mirbase_id_iri(current_mirbase_id)
+    targets_ng = TARGETS_DB_TO_NG[targets_db]
     query = prefixes() + '''
     SELECT DISTINCT ?fbg
-    WHERE {{
-    # original mirbase id to mature mirbase accession
-    ?dmacc mb:has_id <{dmid_orig}> .
-    ?dmacc a mb:mature_mirna .
-    ?dmacc up:database db:mirbase_acc .
-
-    # mirbase acc to all fly mirbase ids
-    ?dmacc mb:has_id ?dmid .
+    WHERE {
+    # flybase genes targeted by this mirbase id
+    GRAPH <''' + targets_ng + '''> {
+        ?dmid mb:targets ?fbg .
+        }
+    FILTER ( ?dmid = <''' + mir + '''> )
     ?dmid up:database db:mirbase_id .
     ?dmid up:organism taxon:7227 .
-
-    GRAPH <{ibanez_method}> {{
-        ?dmid obo:homologous_to ?hmid .
-    }}
-
-    # human mirbase id
-    ?hmid up:organism taxon:9606 .
-    ?hmid up:database db:mirbase_id .
-
-    # original mirbase id to mature mirbase accession
-    ?hmacc mb:has_id ?hmid .
-    ?hmacc a mb:mature_mirna .
-    ?hmacc up:database db:mirbase_acc .
-
-    # mirbase acc to targetscan mir family
-    ?tmf rdfs:seeAlso ?hmacc .
-    ?tmf up:database db:targetscan_mir_family .
-
-    # targetscan mir family to targeted refseq transcripts
-    ?tmf mb:targets ?ref .
-    ?ref up:database db:ncbi_refseq .
-
-    # refseq to uniprot
-    ?hu rdfs:seeAlso ?ref .
-
-    # human - fly orthologs
-    ?hu up:organism taxon:9606 .
-    ?hu up:database db:uniprot .
-    ?du obo:orthologous_to ?hu .
-    ?du up:organism taxon:7227 .
-    ?du up:database db:uniprot .
-
-    # uniprot to flybase gene .
-    ?du rdfs:seeAlso ?fbg .
     ?fbg up:database db:flybase_gene .
     ?fbg up:organism taxon:7227 .
-    }}
-    '''.format(dmid_orig=mir, ibanez_method=ibanez_method)
-    return query_for_ids(query, 'gene')
-
-
-
-def targets_of_human_homologs_of_fly_mir(mirbase_id, ibanez_method, target_db):
-    '''
-    Get the human homologs of a fly mir and then get the targets of those
-    homologs.  Return the set of targets of the homologs, as a list.
-    '''
-    homolog_mirs = human_homologs_of_fly_mir(mirbase_id, ibanez_method)
-    return targets_of_mirs(homolog_mirs, homo, target_db)
-
-def targets_of_human_homologs_of_fly_mirs(mirbase_ids, ibanez_method,
-                                          target_db):
-    '''
-    Combine the targets of each homolog of each fly mirbase id into one
-    giant set, and retur the set as a list.
-    '''
-    func = functools.partial(targets_of_human_homologs_of_fly_mir,
-                             ibanez_method=ibanez_method, target_db=target_db)
-    return map_flatten_set_list(func, mirbase_ids)
-
-
-def slow_fly_orthologs_of_human_genes(genes):
-    return map_flatten_set_list(fly_orthologs_of_human_gene, genes)
-
-
-def fly_orthologs_of_human_genes(genes):
-    if not genes:
-        return []
-
-    gene_iris = [ensembl_gene_iri(gene) for gene in genes]
-    query = prefixes() + '''
-    SELECT DISTINCT ?fbg
-    WHERE {{
-    # human ensembl gene to uniprot
-    ?heg up:organism taxon:9606 .
+    # conserved in human
+    ?heg obo:orthologous_to ?fbg .
     ?heg up:database db:ensembl_gene .
-    ?hu rdfs:seeAlso ?heg .
-
-    FILTER ?heg IN ({hegs})
-
-    # human - fly orthologs
-    ?hu up:organism taxon:9606 .
-    ?hu up:database db:uniprot .
-    ?du obo:orthologous_to ?hu .
-    ?du up:organism taxon:7227 .
-    ?du up:database db:uniprot .
-
-    # uniprot to flybase gene .
-    ?du rdfs:seeAlso ?fbg .
-    ?fbg up:database db:flybase_gene .
-    ?fbg up:organism taxon:7227 .
-
-    }}
-    '''.format(hegs=', '.join('<{}>'.format(iri) for iri in gene_iris))
+    ?heg up:organism taxon:9606 .
+    }
+    '''
     return query_for_ids(query, 'fbg')
 
 
-
-
-def fly_orthologs_of_human_gene(gene):
+def short_fly_targets(mirbase_id, targets_db):
     '''
-    gene: a human ensembl gene id.
-    returns: a list of flybase genes.
+    Return the flybase genes targeted by `mirbase_id` in the predicted targets
+    database `targets_db`.
     '''
-    gene_iri = ensembl_gene_iri(gene)
+    current_mirbase_id = update_mirbase_ids([mirbase_id])[mirbase_id]
+    mir = mirbase_id_iri(current_mirbase_id)
+    targets_ng = TARGETS_DB_TO_NG[targets_db]
     query = prefixes() + '''
     SELECT DISTINCT ?fbg
-    WHERE {{
-    # human ensembl gene to uniprot
-    <{heg}> up:organism taxon:9606 .
-    <{heg}> up:database db:ensembl_gene .
-    ?hu rdfs:seeAlso <{heg}> .
-
-    # human - fly orthologs
-    ?hu up:organism taxon:9606 .
-    ?hu up:database db:uniprot .
-    ?du obo:orthologous_to ?hu .
-    ?du up:organism taxon:7227 .
-    ?du up:database db:uniprot .
-
-    # uniprot to flybase gene .
-    ?du rdfs:seeAlso ?fbg .
+    WHERE {
+    # flybase genes targeted by this mirbase id
+    GRAPH <''' + targets_ng + '''> {
+        ?dmid mb:targets ?fbg .
+        }
+    FILTER ( ?dmid = <''' + mir + '''> )
+    ?dmid up:database db:mirbase_id .
+    ?dmid up:organism taxon:7227 .
     ?fbg up:database db:flybase_gene .
     ?fbg up:organism taxon:7227 .
-    }}
-    '''.format(heg=gene_iri)
+    }
+    '''
+    return query_for_ids(query, 'fbg')
+
+
+def merged_fly_orthologs_of_targets_of_human_mirs_homologous_to_fly_mir(
+    mirbase_id):
+    '''
+    Return flybase genes that are orthologous to human ensembl genes that
+    are targeted by human mirbase ids that are homologous to fly `mirbase_id`.
+    '''
+    current_mirbase_id = update_mirbase_ids([mirbase_id])[mirbase_id]
+    mir = mirbase_id_iri(current_mirbase_id)
+    query = prefixes() + '''
+    SELECT DISTINCT ?fbg
+    WHERE {
+    # get human mirbase ids homologous to this fly mirbase id
+    ?dmid obo:homologous_to ?hmid .
+    FILTER ( ?dmid = <''' + mir + '''> )
+    ?dmid up:database db:mirbase_id .
+    ?dmid up:organism taxon:7227 .
+    ?hmid up:database db:mirbase_id .
+    ?hmid up:organism taxon:9606 .
+    # human mirbase id to ensembl gene
+    ?hmid mb:targets ?heg .
+    ?heg up:database db:ensembl_gene .
+    ?heg up:organism taxon:9606 .
+    # flybase gene orthologous to ensembl gene
+    ?heg obo:orthologous_to ?fbg .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    }
+    '''
+    return query_for_ids(query, 'fbg')
+
+
+def short_fly_orthologs_of_targets_of_human_mirs_homologous_to_fly_mir(
+    mirbase_id, ibanez_method, targets_db):
+    '''
+    Return flybase genes that are orthologous to human ensembl genes that
+    are targeted (according to `targets_db` by human mirbase ids that are
+    homologous (according to `ibanez_method`) to fly `mirbase_id`.
+    '''
+    current_mirbase_id = update_mirbase_ids([mirbase_id])[mirbase_id]
+    mir = mirbase_id_iri(current_mirbase_id)
+    method_ng = IBANEZ_METHOD_TO_NG[ibanez_method]
+    targets_ng = TARGETS_DB_TO_NG[targets_db]
+    query = prefixes() + '''
+    SELECT DISTINCT ?fbg
+    WHERE {
+    # get human mirbase ids homologous to this fly mirbase id
+    GRAPH <''' + method_ng + '''> {
+        ?dmid obo:homologous_to ?hmid .
+    }
+    FILTER ( ?dmid = <''' + mir + '''> )
+    ?dmid up:database db:mirbase_id .
+    ?dmid up:organism taxon:7227 .
+    ?hmid up:database db:mirbase_id .
+    ?hmid up:organism taxon:9606 .
+    # human mirbase id to ensembl gene
+    GRAPH <''' + targets_ng + '''> {
+        ?hmid mb:targets ?heg .
+        }
+    ?heg up:database db:ensembl_gene .
+    ?heg up:organism taxon:9606 .
+    # flybase gene orthologous to ensembl gene
+    ?heg obo:orthologous_to ?fbg .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    }
+    '''
     return query_for_ids(query, 'fbg')
 
 
@@ -1486,6 +1642,8 @@ def write_set_overlap_file(set1, set2, name1, name2, filename):
     name2: Like name 1, but for set 2.
     filename: where to write the csv file.
     '''
+    set1 = set(set1)
+    set2 = set(set2)
     one_not_two = sorted(set1 - set2)
     two_not_one = sorted(set2 - set1)
     one_and_two = sorted(set1 & set2)
@@ -1500,7 +1658,7 @@ def write_set_overlap_file(set1, set2, name1, name2, filename):
 def write_list_file(items, filename):
     makedirs(os.path.dirname(filename))
     with open(filename, 'w') as fh:
-        fh.write(''.join([item + '\n' for item in items]))
+        fh.write(''.join([item + '\n' for item in sorted(items)]))
 
 
 def write_csv_file(rows, filename, headers=None):
@@ -1517,9 +1675,89 @@ def write_csv_file(rows, filename, headers=None):
             writer.writerow(row)
 
 
+# PHASE 0
+# Write useful list of genes and lookup tables.
+
+def write_conserved_synaptic_genes():
+    dn = os.path.join(results_dir(), 'conserved_synapse_genes')
+    fn = os.path.join(dn, 'fly_conserved_synapse_genes.txt')
+    genes = fly_conserved_synapse_genes()
+    write_list_file(genes, fn)
+    fn = os.path.join(dn, 'human_conserved_synapse_genes.txt')
+    genes = human_conserved_synapse_genes()
+    write_list_file(genes, fn)
+
+
+def write_affymetrix_to_flybase_table():
+    fn = os.path.join(results_dir(), 'affymetrix_to_flybase_genes.csv')
+    write_csv_file(affymetrix_to_flybase_table(), fn,
+                   headers=('affymetrix_probeset_id', 'flybase_gene'))
+
+
+def write_human_to_fly_conserved_synapse_genes_table():
+    dn = os.path.join(results_dir(), 'conserved_synapse_genes')
+    fn = os.path.join(dn, 'human_to_fly_conserved_synapse_genes.csv')
+    write_csv_file(human_to_fly_conserved_synapse_genes_table(), fn,
+                   headers=('ensembl_gene', 'flybase_gene'))
+
+
 # PHASE I
-# HUMAN and FLY, MICROCOSM and TARGETSCAN, mirs targeting conserved synapse genes.
-# ALSO VALIDATED FLY MIRS
+# Phase one focuses on miRs that target conserved synaptic genes.
+# What are the conserved synaptic genes in fly and human?
+# What are the microRNA targeting those genes in fly and human, for microcosm,
+# targetscan, and merged?
+# What are the overlaps of miRs for targetscan and microcosm?
+# What is the overlap of the functionally validated fly mirs and the
+# (microcosm, targetscan, merged) fly mirs targeting conserved synapse genes?
+
+
+def phase_1_mirs_fn(method, species, dirname):
+    basename = '{method}_predicted_{species}_mirs_'
+    basename += 'targeting_conserved_synaptic_genes.txt'
+    return os.path.join(dirname, basename.format(
+        method=method, species=species))
+
+
+def write_phase_1():
+    dn = os.path.join(results_dir(), 'phase1')
+
+    targ_hm = short_mirs_targeting_conserved_synapse_genes(TARGETSCAN, homo)
+    targ_fm = short_mirs_targeting_conserved_synapse_genes(TARGETSCAN, dro)
+    micr_hm = short_mirs_targeting_conserved_synapse_genes(MICROCOSM, homo)
+    micr_fm = short_mirs_targeting_conserved_synapse_genes(MICROCOSM, dro)
+    merg_hm = short_mirs_targeting_conserved_synapse_genes(MERGED, homo)
+    merg_fm = short_mirs_targeting_conserved_synapse_genes(MERGED, dro)
+    # functionally validated
+    vali_fm = set(validated_mirs)
+
+    assert set(merg_hm) == (set(targ_hm) | set(micr_hm))
+    assert set(merg_fm) == (set(targ_fm) | set(micr_fm))
+
+    write_list_file(targ_hm, phase_1_mirs_fn('targetscan', 'human', dn))
+    write_list_file(targ_fm, phase_1_mirs_fn('targetscan', 'fly', dn))
+    write_list_file(micr_hm, phase_1_mirs_fn('microcosm', 'human', dn))
+    write_list_file(micr_fm, phase_1_mirs_fn('microcosm', 'fly', dn))
+    write_list_file(merg_hm, phase_1_mirs_fn('merged', 'human', dn))
+    write_list_file(merg_fm, phase_1_mirs_fn('merged', 'fly', dn))
+    fn = os.path.join(dn, 'validated_fly_mirs.txt')
+    write_list_file(vali_fm, fn)
+
+    fn = os.path.join(dn, 'overlap_between_microcosm_and_targetscan_human' +
+                      '_mirs_targeting_conserved_synaptic_genes.csv')
+    write_set_overlap_file(micr_hm, targ_hm, 'microcosm', 'targetscan', fn)
+    fn = os.path.join(dn, 'overlap_between_microcosm_and_targetscan_fly' +
+                      '_mirs_targeting_conserved_synaptic_genes.csv')
+    write_set_overlap_file(micr_fm, targ_fm, 'microcosm', 'targetscan', fn)
+    fn = os.path.join(dn, 'overlap_between_validated_and_targetscan_fly' +
+                      '_mirs_targeting_conserved_synaptic_genes.csv')
+    write_set_overlap_file(vali_fm, targ_fm, 'validated', 'targetscan', fn)
+    fn = os.path.join(dn, 'overlap_between_validated_and_microcosm_fly' +
+                      '_mirs_targeting_conserved_synaptic_genes.csv')
+    write_set_overlap_file(vali_fm, micr_fm, 'validated', 'microcosm', fn)
+    fn = os.path.join(dn, 'overlap_between_validated_and_merged_fly' +
+                      '_mirs_targeting_conserved_synaptic_genes.csv')
+    write_set_overlap_file(vali_fm, merg_fm, 'validated', 'merged', fn)
+
 
 def write_targetscan_human_mirs_targeting_conserved_synapse_genes():
     dn = os.path.join(results_dir(), 'phase1')
@@ -1585,56 +1823,15 @@ def write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs()
     write_set_overlap_file(validated, predicted, 'validated', 'predicted', fn)
 
 
-def write_conserved_synaptic_genes():
-    dn = os.path.join(results_dir(), 'conserved_synapse_genes')
-    fn = os.path.join(dn, 'fly_conserved_synapse_genes.txt')
-    genes = fly_conserved_synapse_genes()
-    write_list_file(genes, fn)
-    fn = os.path.join(dn, 'human_conserved_synapse_genes.txt')
-    genes = human_conserved_synapse_genes()
-    write_list_file(genes, fn)
-
-
-def write_affymetrix_to_flybase_table():
-    fn = os.path.join(results_dir(), 'affymetrix_to_flybase_genes.csv')
-    write_csv_file(affymetrix_to_flybase_table(), fn,
-                   headers=('affymetrix_probeset_id', 'flybase_gene'))
-
-
-def write_human_to_fly_conserved_synapse_genes_table():
-    dn = os.path.join(results_dir(), 'conserved_synapse_genes')
-    fn = os.path.join(dn, 'human_to_fly_conserved_synapse_genes.csv')
-    write_csv_file(human_to_fly_conserved_synapse_genes_table(), fn,
-                   headers=('ensembl_gene', 'flybase_gene'))
-
-
-def write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs():
-    dn = os.path.join(results_dir(), 'overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs')
-    # filename template
-    fnt = 'overlap_of_{}_{}_targets_and_conserved_human_mir_{}_homolog_targets'
-    for target_db in [MICROCOSM, TARGETSCAN]:
-        for ibanez_method in [ibanez.FIVE_PRIME, ibanez.FULL_SEQ]:
-            for mir in validated_mirs[:1]:
-                print target_db, ibanez_method, mir
-                fn = os.path.join(dn, fnt.format(mir, target_db, ibanez_method))
-                fly_targets = set(targets_of_mirs([mir], dro, target_db))
-                fly_ortholog_targets = set(fly_orthologs_of_targetscan_targets_of_human_mirs_homologous_to_fly_mir(
-                    mir, ibanez_method))
-                write_set_overlap_file(fly_targets, fly_ortholog_targets,
-                                       'fly_targets', 'human_target_orthologs',
-                                       fn)
-                # homo_targets = targets_of_human_homologs_of_fly_mir(
-                    # mir, ibanez_method, target_db)
-                # fly_ortholog_targets = fly_orthologs_of_human_genes(homo_targets)
-
-
 # PHASE II
 # SETS and OVERLAPS for
 # For EACH SCREENED MIR
 #     MICROCOSM TARGETED FLY GENES (FBgn)
 #     TARGETSCAN TARGETED FLY GENES (FBgn)
+#     MERGED TARGETED FLY GENES (FBgn)
 #     MICROCOSM TARGETED HUMAN GENES (ENSG)
 #     TARGETSCAN TARGETED HUMAN GENES (ENSG)
+#     MERGED TARGETED HUMAN GENES (ENSG)
 #     For EACH TISSUE TYPE
 #         SCREENED REGULATED FLY GENES (FBgn)
 # - TARGETS OF 7 SCREENED MIRS in 2 TISSUES VS PREDICTED TARGETS of MICROCOSM and TARGETSCAN
@@ -1642,23 +1839,27 @@ def write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_ho
 # FOR EACH VALIDATED FLY MIR:
 #     PREDICTED TARGETS OF THE FLY MIR COMPARED TO (UNION OF PREDICTED TARGETS OF THE HUMAN HOMOLOGS OF THE FLY MIR)
 
+
 def write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets():
-    dn = os.path.join(results_dir(), 'overlap_of_screened_and_predicted_target_genes')
+    dn = os.path.join(results_dir(), 'phase2', 'overlap_of_screened_and_predicted_target_genes')
     for mir in screened_mirs:
         microcosm_targets = set(microcosm_predicted_fly_mir_targets(mir))
         targetscan_targets = set(targetscan_predicted_fly_mir_targets(mir))
         mt_fn = os.path.join(dn, '{}_overlap_between_microcosm_and_targetscan_targets.csv'.format(mir))
         write_set_overlap_file(microcosm_targets, targetscan_targets, 'microcosm', 'targetscan', mt_fn)
+        merg_fg = merged_fly_targets(mir)
         for tissue in TISSUES:
             screened_targets = set(screened_fly_mir_targets_in_tissue(mir, tissue))
             sm_fn = os.path.join(dn, '{}_{}_overlap_between_screened_and_microcosm_targets.csv'.format(mir, tissue))
             write_set_overlap_file(screened_targets, microcosm_targets, 'screened', 'microcosm', sm_fn)
             st_fn = os.path.join(dn, '{}_{}_overlap_between_screened_and_targetscan_targets.csv'.format(mir, tissue))
             write_set_overlap_file(screened_targets, targetscan_targets, 'screened', 'targetscan', st_fn)
+            merg_fn = os.path.join(dn, '{}_{}_overlap_between_screened_and_merged_targets.csv'.format(mir, tissue))
+            write_set_overlap_file(screened_targets, merg_fg, 'screened', 'merged', merg_fn)
 
 
 def write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes():
-    dn = os.path.join(results_dir(), 'overlap_of_nmj_rnai_genes_and_screened_fly_targets')
+    dn = os.path.join(results_dir(), 'phase2', 'overlap_of_nmj_rnai_genes_and_screened_fly_targets')
     nmj_rnai = set(get_nmj_rnai_genes())
     for mir in screened_mirs:
         for tissue in TISSUES:
@@ -1668,7 +1869,7 @@ def write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes():
 
 
 def write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes():
-    dn = os.path.join(results_dir(), 'overlap_of_nmj_rnai_genes_and_predicted_fly_targets')
+    dn = os.path.join(results_dir(), 'phase2', 'overlap_of_nmj_rnai_genes_and_predicted_fly_targets')
     nmj_rnai = set(get_nmj_rnai_genes())
     for mir in validated_mirs:
         microcosm_targets = set(microcosm_predicted_fly_mir_targets(mir))
@@ -1677,6 +1878,92 @@ def write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes():
         targetscan_targets = set(targetscan_predicted_fly_mir_targets(mir))
         fn = os.path.join(dn, '{}_overlap_of_nmj_rnai_genes_and_targetscan_fly_targets.csv'.format(mir))
         write_set_overlap_file(nmj_rnai, targetscan_targets, 'nmj_rnai_genes', 'targetscan', fn)
+        merg_fg = merged_fly_targets(mir)
+        fn = os.path.join(dn, '{}_overlap_of_nmj_rnai_genes_and_merged_fly_targets.csv'.format(mir))
+        write_set_overlap_file(nmj_rnai, merg_fg, 'nmj_rnai_genes', 'merged', fn)
+
+
+def write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs():
+    dn = os.path.join(results_dir(), 'phase2', 'overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs')
+    # filename template
+    fnt = 'overlap_of_{}_{}_targets_and_conserved_human_mir_{}_homolog_targets.csv'
+    mfnt = 'overlap_of_{}_merged_targets_and_conserved_human_mir_homolog_targets.csv'
+    for mir in validated_mirs:
+        # merged fly targets
+        merg_fg = merged_conserved_fly_targets(mir)
+        # merged fly ortholog targets
+        merg_fog = merged_fly_orthologs_of_targets_of_human_mirs_homologous_to_fly_mir(mir)
+        fn = os.path.join(dn, mfnt.format(mir))
+        write_set_overlap_file(merg_fg, merg_fog, 'fly_targets',
+                               'human_target_orthologs', fn)
+        for targets_db, ibanez_method in itertools.product(targets_dbs,
+                                                           ibanez_methods):
+            fn = os.path.join(dn, fnt.format(mir, targets_db, ibanez_method))
+            print targets_db, ibanez_method, mir, fn
+            fly_targets = short_conserved_fly_targets(mir, targets_db)
+            fly_ortholog_targets = short_fly_orthologs_of_targets_of_human_mirs_homologous_to_fly_mir(
+                mir, ibanez_method, targets_db)
+            write_set_overlap_file(fly_targets, fly_ortholog_targets,
+                                    'fly_targets', 'human_target_orthologs',
+                                    fn)
+
+
+# PHASE III
+# Rank the 27 functionally validated miRs by percentage of predicted targets that are also in the NMJ RNAi genes.
+# Rank the 27 functionally validated miRs by percentage of predicted targets that are also conserved synaptic genes.
+
+def write_ranked_validated_mir_targets():
+    print 'write_ranked_validated_mir_targets'
+    # global validated_mirs
+    # validated_mirs = validated_mirs[:2]
+    dn = makedirs(os.path.join(results_dir(), 'phase3', 'ranked_validated_mirs'))
+    fnt = 'ranked_validated_mirs_using_{}_and_{}.csv'
+    rnai = set(get_nmj_rnai_genes())
+    conserved = set(fly_conserved_synapse_genes())
+    other_pairs = [(rnai, 'nmj_rnai_genes'), 
+                   (conserved, 'conserved_synapse_genes')]
+    params = itertools.product(targets_dbs, 
+                               [(rnai, 'nmj_rnai_genes'), 
+                      (conserved, 'conserved_synapse_genes')])
+    for other_genes, other_name in other_pairs:
+        # merged
+        mir_targets = {mir: merged_fly_targets(mir) for mir in validated_mirs}
+        fn = os.path.join(dn, fnt.format('merged', other_name))
+        print 'writing', fn
+        write_ranked_validated_mir_targets_sub(
+            fn, validated_mirs, mir_targets, other_genes, other_name)
+        # targetscan and microcosm
+        for targets_db in targets_dbs:
+            mir_targets = {mir: short_fly_targets(mir, targets_db) for mir in
+                        validated_mirs}
+            fn = os.path.join(dn, fnt.format(targets_db, other_name))
+            print 'writing', fn
+            write_ranked_validated_mir_targets_sub(
+                fn, validated_mirs, mir_targets, other_genes, other_name)
+
+
+def write_ranked_validated_mir_targets_sub(filename, mirs, mir_targets,
+                                           other_genes, other_name):
+    headers = ['validated_mir', 'num_target_genes', 'num_{other}_genes',
+               'num_in_intersection', 'percent_target_genes_in_{other}_genes',
+               'percent_{other}_genes_in_target_genes']
+    template = ','.join('{}' for h in headers) + '\n'
+    others = set(other_genes)
+    num_others = len(others)
+    with open(filename, 'w') as fh:
+        fh.write(template.format(*headers).format(other=other_name))
+        for mir in mirs:
+            targets = set(mir_targets[mir])
+            num_targets = len(targets)
+            num_intersection = len(targets & others)
+            if num_targets > 0:
+                percent_targets_in_others = num_intersection / float(num_targets)
+            else:
+                percent_targets_in_others = 'NaN'
+            percent_others_in_targets = num_intersection / float(num_others)
+            fields = (mir, num_targets, num_others,num_intersection,
+                      percent_targets_in_others, percent_others_in_targets)
+            fh.write(template.format(*fields))
 
 
 
@@ -1743,30 +2030,63 @@ def workflow():
         construct_microcosm_fly_mirna_id_to_gene_edges()
         construct_targetscan_human_mirna_id_to_gene_edges()
         construct_targetscan_fly_mirna_id_to_gene_edges()
+        construct_roundup_human_gene_to_fly_gene_edges()
+        construct_ibanez_fullseq_edges()
+        construct_ibanez_five_prime_edges()
         load_constructed_edges()
 
+        # PHASE ZERO
+        write_conserved_synaptic_genes()
+        write_affymetrix_to_flybase_table()
+        write_human_to_fly_conserved_synapse_genes_table()
+
         # PHASE I
-        write_targetscan_human_mirs_targeting_conserved_synapse_genes()
-        write_microcosm_human_mirs_targeting_conserved_synapse_genes()
-        write_overlap_between_microcosm_human_mirs_and_targetscan_human_mirs()
-        write_targetscan_fly_mirs_targeting_conserved_synapse_genes()
-        write_microcosm_fly_mirs_targeting_conserved_synapse_genes()
-        write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs()
-        write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs()
-        write_overlap_between_microcosm_fly_mirs_and_targetscan_fly_mirs()
+        write_phase_1()
+        # write_targetscan_human_mirs_targeting_conserved_synapse_genes()
+        # write_microcosm_human_mirs_targeting_conserved_synapse_genes()
+        # write_overlap_between_microcosm_human_mirs_and_targetscan_human_mirs()
+        # write_targetscan_fly_mirs_targeting_conserved_synapse_genes()
+        # write_microcosm_fly_mirs_targeting_conserved_synapse_genes()
+        # write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs()
+        # write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs()
+        # write_overlap_between_microcosm_fly_mirs_and_targetscan_fly_mirs()
 
         # PHASE II
         write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets()
         write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes()
         write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes()
+        write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs()
 
+        # PHASE III
+        write_ranked_validated_mir_targets()
+
+    else:
+
+
+        # PHASE ZERO
         write_conserved_synaptic_genes()
         write_affymetrix_to_flybase_table()
         write_human_to_fly_conserved_synapse_genes_table()
 
+        # PHASE I
+        write_phase_1()
+        # write_targetscan_human_mirs_targeting_conserved_synapse_genes()
+        # write_microcosm_human_mirs_targeting_conserved_synapse_genes()
+        # write_overlap_between_microcosm_human_mirs_and_targetscan_human_mirs()
+        # write_targetscan_fly_mirs_targeting_conserved_synapse_genes()
+        # write_microcosm_fly_mirs_targeting_conserved_synapse_genes()
+        # write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs()
+        # write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs()
+        # write_overlap_between_microcosm_fly_mirs_and_targetscan_fly_mirs()
+
+        # PHASE II
+        write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets()
+        write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes()
+        write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes()
         write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs()
 
-    else:
+        # PHASE III
+        write_ranked_validated_mir_targets()
 
         pass
 

@@ -61,7 +61,21 @@ def download_sparql_construct_rdf(qry, filename, endpoint):
     return count
 
 
-def map_flatten_set_list(func, items):
+def map_flatten_set_list(func, *args_lists):
+    '''
+    Run a function, one that returns a sequence, on each element of items.
+    Flatten the sequences into a single list, and return a list of the
+    unique items.
+    Example: 
+        >>> map_flatten_set_list(lambda x: (x, x+1), [1, 2, 4])
+        [1, 2, 3, 4, 5]
+
+    '''
+    result_lists = map(func, *args_lists)
+    return list(set(i for list in results_lists for i in lst))
+
+
+def map_flatten_set_list_old(func, items):
     '''
     Run a function, one that returns a sequence, on each element of items.
     Flatten the sequences into a single list, and return a list of the
