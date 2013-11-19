@@ -147,6 +147,7 @@ def venv_pth():
 # HOST SERVER TASKS
 # Installing, configuring, starting, and stopping servers on a host
 
+
 @task
 def install_stardog():
     '''
@@ -185,10 +186,12 @@ def install_stardog():
            stardog-admin server stop --username admin --passwd {password} \\
         '''.format(password=secrets.stardog_admin_password))
 
+
 @task
 def conf_stardog():
     put(os.path.join(HERE, 'conf', stardog_name, 'stardog.properties'),
         config.stardog_home)
+
 
 @task
 def uninstall_stardog():
@@ -197,6 +200,7 @@ def uninstall_stardog():
     '''
     sudo('rm -rf /usr/local/{sd}'.format(sd=stardog_name))
     sudo('rm -f /usr/local/bin/stardog /usr/local/bin/stardog-admin')
+
 
 @task
 def uninstall_stardog_home():

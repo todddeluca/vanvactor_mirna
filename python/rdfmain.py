@@ -19,6 +19,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import subprocess
 import urllib
 import sys
@@ -28,6 +29,7 @@ import functools
 import rdflib
 import requests.exceptions
 
+import util
 import config
 import secrets
 import virtuoso
@@ -143,6 +145,239 @@ validated_mirs = [
     u'dme-miR-313-3p', u'dme-miR-314-3p', u'dme-miR-316-5p', u'dme-miR-932-5p',
     u'dme-miR-969-5p', u'dme-miR-970-3p', u'dme-miR-978-3p', u'dme-miR-979-3p',
     u'dme-miR-982-5p', u'dme-miR-999-3p', u'dme-miR-1014-3p']
+
+# Copied from a list of 147? mirs emailed from Elizabeth McNeill (most of
+# mirbase drosophila mirnas from a few years before 2013?)
+original_147_mirs = [
+    'bantam', 'let-7', 'mir-1', 'mir-2a', 'mir-2b', 'mir-2c', 'mir-3', 'mir-4',
+    'mir-5', 'mir-6', 'mir-7', 'mir-8', 'mir-9a', 'mir-9b', 'mir-9c', 'mir-10',
+    'mir-11', 'mir-12', 'mir-13a', 'mir-13b', 'mir-14', 'mir-31a', 'mir-31b',
+    'mir-33', 'mir-34', 'mir-79', 'mir-87', 'mir-92a', 'mir-92b', 'mir-100',
+    'mir-124', 'mir-125', 'mir-133', 'mir-137', 'mir-184', 'mir-190',
+    'mir-193', 'mir-210', 'mir-219', 'mir-252', 'mir-263a', 'mir-263b',
+    'mir-274', 'mir-275', 'mir-276', 'mir-276a', 'mir-276b', 'mir-277',
+    'mir-278', 'mir-279', 'mir-281', 'mir-2811', 'mir-2812', 'mir-282',
+    'mir-283', 'mir-284', 'mir-285', 'mir-286', 'mir-287', 'mir-288',
+    'mir-289', 'mir-303', 'mir-304', 'mir-305', 'mir-306', 'mir-307',
+    'mir-308', 'mir-309', 'mir-310', 'mir-311', 'mir-312', 'mir-313',
+    'mir-314', 'mir-315', 'mir-316', 'mir-317', 'mir-318', 'mir-375',
+    'mir-927', 'mir-929', 'mir-932', 'mir-954', 'mir-955', 'mir-956',
+    'mir-957', 'mir-958', 'mir-959', 'mir-960', 'mir-961', 'mir-962',
+    'mir-963', 'mir-964', 'mir-965', 'mir-966', 'mir-967', 'mir-968',
+    'mir-969', 'mir-970', 'mir-971', 'mir-972', 'mir-973', 'mir-974',
+    'mir-975', 'mir-976', 'mir-977', 'mir-978', 'mir-979', 'mir-980',
+    'mir-981', 'mir-982', 'mir-983', 'mir-984', 'mir-985', 'mir-986',
+    'mir-987', 'mir-988', 'mir-989', 'mir-990', 'mir-991', 'mir-992',
+    'mir-993', 'mir-994', 'mir-995', 'mir-996', 'mir-997', 'mir-998',
+    'mir-999', 'mir-1000', 'mir-1001', 'mir-1002', 'mir-1003', 'mir-1004',
+    'mir-1005', 'mir-1006', 'mir-1007', 'mir-1008', 'mir-1009', 'mir-1010',
+    'mir-1011', 'mir-1012', 'mir-1013', 'mir-1014', 'mir-1015', 'mir-1016',
+    'mir-1017', 'mir-iab-4-3p', 'mir-iab-4-5p', ]
+
+# The only original mirbase ids that could not be mapped to a current mirbase
+# id were mir-276, mir-2811 and mir-2812.  mir-2811 is a dead id, mir-2812 is
+# an id for bro-mir-2812 (i.e. wrong species), and mir-276 legitimately looked
+# like it should have been searched for under dme-miR-276a and dme-miR-276b.
+# However, since both of those mirs were independently searched for, no loss of
+# information occurred by excluding mir-276.
+
+# There 144 out of 147 that were mapped to a current mirbase id.
+original_147_updated_data = [
+    ['bantam', u'dme-bantam', u'dme-bantam-3p'],
+    ['let-7', u'dme-let-7', u'dme-let-7-5p'],
+    ['mir-1', u'dme-miR-1', u'dme-miR-1-3p'],
+    ['mir-2a', u'dme-miR-2a', u'dme-miR-2a-3p'],
+    ['mir-2b', u'dme-miR-2b', u'dme-miR-2b-3p'],
+    ['mir-2c', u'dme-miR-2c', u'dme-miR-2c-3p'],
+    ['mir-3', u'dme-miR-3', u'dme-miR-3-3p'],
+    ['mir-4', u'dme-miR-4', u'dme-miR-4-3p'],
+    ['mir-5', u'dme-miR-5', u'dme-miR-5-5p'],
+    ['mir-6', u'dme-miR-6', u'dme-miR-6-3p'],
+    ['mir-7', u'dme-miR-7', u'dme-miR-7-5p'],
+    ['mir-8', u'dme-miR-8', u'dme-miR-8-3p'],
+    ['mir-9a', u'dme-miR-9a', u'dme-miR-9a-5p'],
+    ['mir-9b', u'dme-miR-9b', u'dme-miR-9b-5p'],
+    ['mir-9c', u'dme-miR-9c', u'dme-miR-9c-5p'],
+    ['mir-10', u'dme-miR-10', u'dme-miR-10-5p'],
+    ['mir-11', u'dme-miR-11', u'dme-miR-11-3p'],
+    ['mir-12', u'dme-miR-12', u'dme-miR-12-5p'],
+    ['mir-13a', u'dme-miR-13a', u'dme-miR-13a-3p'],
+    ['mir-13b', u'dme-miR-13b', u'dme-miR-13b-3p'],
+    ['mir-14', u'dme-miR-14', u'dme-miR-14-3p'],
+    ['mir-31a', u'dme-miR-31a', u'dme-miR-31a-5p'],
+    ['mir-31b', u'dme-miR-31b', u'dme-miR-31b-5p'],
+    ['mir-33', u'dme-miR-33', u'dme-miR-33-5p'],
+    ['mir-34', u'dme-miR-34', u'dme-miR-34-5p'],
+    ['mir-79', u'dme-miR-79', u'dme-miR-79-3p'],
+    ['mir-87', u'dme-miR-87', u'dme-miR-87-3p'],
+    ['mir-92a', u'dme-miR-92a', u'dme-miR-92a-3p'],
+    ['mir-92b', u'dme-miR-92b', u'dme-miR-92b-3p'],
+    ['mir-100', u'dme-miR-100', u'dme-miR-100-5p'],
+    ['mir-124', u'dme-miR-124', u'dme-miR-124-3p'],
+    ['mir-125', u'dme-miR-125', u'dme-miR-125-5p'],
+    ['mir-133', u'dme-miR-133', u'dme-miR-133-3p'],
+    ['mir-137', u'dme-miR-137', u'dme-miR-137-3p'],
+    ['mir-184', u'dme-miR-184', u'dme-miR-184-3p'],
+    ['mir-190', u'dme-miR-190', u'dme-miR-190-5p'],
+    ['mir-193', u'dme-miR-193', u'dme-miR-193-3p'],
+    ['mir-210', u'dme-miR-210', u'dme-miR-210-3p'],
+    ['mir-219', u'dme-miR-219', u'dme-miR-219-5p'],
+    ['mir-252', u'dme-miR-252', u'dme-miR-252-5p'],
+    ['mir-263a', u'dme-miR-263a', u'dme-miR-263a-5p'],
+    ['mir-263b', u'dme-miR-263b', u'dme-miR-263b-5p'],
+    ['mir-274', u'dme-miR-274', u'dme-miR-274-5p'],
+    ['mir-275', u'dme-miR-275', u'dme-miR-275-3p'],
+    ['mir-276', u'dme-miR-276', None],
+    ['mir-276a', u'dme-miR-276a', u'dme-miR-276a-3p'],
+    ['mir-276b', u'dme-miR-276b', u'dme-miR-276b-3p'],
+    ['mir-277', u'dme-miR-277', u'dme-miR-277-3p'],
+    ['mir-278', u'dme-miR-278', u'dme-miR-278-3p'],
+    ['mir-279', u'dme-miR-279', u'dme-miR-279-3p'],
+    ['mir-281', u'dme-miR-281', u'dme-miR-281-3p'],
+    ['mir-2811', u'dme-miR-2811', None],
+    ['mir-2812', u'dme-miR-2812', None],
+    ['mir-282', u'dme-miR-282', u'dme-miR-282-5p'],
+    ['mir-283', u'dme-miR-283', u'dme-miR-283-5p'],
+    ['mir-284', u'dme-miR-284', u'dme-miR-284-3p'],
+    ['mir-285', u'dme-miR-285', u'dme-miR-285-3p'],
+    ['mir-286', u'dme-miR-286', u'dme-miR-286-3p'],
+    ['mir-287', u'dme-miR-287', u'dme-miR-287-3p'],
+    ['mir-288', u'dme-miR-288', u'dme-miR-288-3p'],
+    ['mir-289', u'dme-miR-289', u'dme-miR-289-5p'],
+    ['mir-303', u'dme-miR-303', u'dme-miR-303-5p'],
+    ['mir-304', u'dme-miR-304', u'dme-miR-304-5p'],
+    ['mir-305', u'dme-miR-305', u'dme-miR-305-5p'],
+    ['mir-306', u'dme-miR-306', u'dme-miR-306-5p'],
+    ['mir-307', u'dme-miR-307', u'dme-miR-307a-3p'],
+    ['mir-308', u'dme-miR-308', u'dme-miR-308-3p'],
+    ['mir-309', u'dme-miR-309', u'dme-miR-309-3p'],
+    ['mir-310', u'dme-miR-310', u'dme-miR-310-3p'],
+    ['mir-311', u'dme-miR-311', u'dme-miR-311-3p'],
+    ['mir-312', u'dme-miR-312', u'dme-miR-312-3p'],
+    ['mir-313', u'dme-miR-313', u'dme-miR-313-3p'],
+    ['mir-314', u'dme-miR-314', u'dme-miR-314-3p'],
+    ['mir-315', u'dme-miR-315', u'dme-miR-315-5p'],
+    ['mir-316', u'dme-miR-316', u'dme-miR-316-5p'],
+    ['mir-317', u'dme-miR-317', u'dme-miR-317-3p'],
+    ['mir-318', u'dme-miR-318', u'dme-miR-318-3p'],
+    ['mir-375', u'dme-miR-375', u'dme-miR-375-3p'],
+    ['mir-927', u'dme-miR-927', u'dme-miR-927-5p'],
+    ['mir-929', u'dme-miR-929', u'dme-miR-929-3p'],
+    ['mir-932', u'dme-miR-932', u'dme-miR-932-5p'],
+    ['mir-954', u'dme-miR-954', u'dme-miR-954-5p'],
+    ['mir-955', u'dme-miR-955', u'dme-miR-955-5p'],
+    ['mir-956', u'dme-miR-956', u'dme-miR-956-3p'],
+    ['mir-957', u'dme-miR-957', u'dme-miR-957-3p'],
+    ['mir-958', u'dme-miR-958', u'dme-miR-958-3p'],
+    ['mir-959', u'dme-miR-959', u'dme-miR-959-3p'],
+    ['mir-960', u'dme-miR-960', u'dme-miR-960-5p'],
+    ['mir-961', u'dme-miR-961', u'dme-miR-961-5p'],
+    ['mir-962', u'dme-miR-962', u'dme-miR-962-5p'],
+    ['mir-963', u'dme-miR-963', u'dme-miR-963-5p'],
+    ['mir-964', u'dme-miR-964', u'dme-miR-964-5p'],
+    ['mir-965', u'dme-miR-965', u'dme-miR-965-3p'],
+    ['mir-966', u'dme-miR-966', u'dme-miR-966-5p'],
+    ['mir-967', u'dme-miR-967', u'dme-miR-967-5p'],
+    ['mir-968', u'dme-miR-968', u'dme-miR-968-5p'],
+    ['mir-969', u'dme-miR-969', u'dme-miR-969-5p'],
+    ['mir-970', u'dme-miR-970', u'dme-miR-970-3p'],
+    ['mir-971', u'dme-miR-971', u'dme-miR-971-3p'],
+    ['mir-972', u'dme-miR-972', u'dme-miR-972-3p'],
+    ['mir-973', u'dme-miR-973', u'dme-miR-973-5p'],
+    ['mir-974', u'dme-miR-974', u'dme-miR-974-5p'],
+    ['mir-975', u'dme-miR-975', u'dme-miR-975-5p'],
+    ['mir-976', u'dme-miR-976', u'dme-miR-976-3p'],
+    ['mir-977', u'dme-miR-977', u'dme-miR-977-3p'],
+    ['mir-978', u'dme-miR-978', u'dme-miR-978-3p'],
+    ['mir-979', u'dme-miR-979', u'dme-miR-979-3p'],
+    ['mir-980', u'dme-miR-980', u'dme-miR-980-3p'],
+    ['mir-981', u'dme-miR-981', u'dme-miR-981-3p'],
+    ['mir-982', u'dme-miR-982', u'dme-miR-982-5p'],
+    ['mir-983', u'dme-miR-983', u'dme-miR-983-5p'],
+    ['mir-984', u'dme-miR-984', u'dme-miR-984-5p'],
+    ['mir-985', u'dme-miR-985', u'dme-miR-985-3p'],
+    ['mir-986', u'dme-miR-986', u'dme-miR-986-5p'],
+    ['mir-987', u'dme-miR-987', u'dme-miR-987-5p'],
+    ['mir-988', u'dme-miR-988', u'dme-miR-988-3p'],
+    ['mir-989', u'dme-miR-989', u'dme-miR-989-3p'],
+    ['mir-990', u'dme-miR-990', u'dme-miR-990-5p'],
+    ['mir-991', u'dme-miR-991', u'dme-miR-991-3p'],
+    ['mir-992', u'dme-miR-992', u'dme-miR-992-3p'],
+    ['mir-993', u'dme-miR-993', u'dme-miR-993-3p'],
+    ['mir-994', u'dme-miR-994', u'dme-miR-994-5p'],
+    ['mir-995', u'dme-miR-995', u'dme-miR-995-3p'],
+    ['mir-996', u'dme-miR-996', u'dme-miR-996-3p'],
+    ['mir-997', u'dme-miR-997', u'dme-miR-997-5p'],
+    ['mir-998', u'dme-miR-998', u'dme-miR-998-3p'],
+    ['mir-999', u'dme-miR-999', u'dme-miR-999-3p'],
+    ['mir-1000', u'dme-miR-1000', u'dme-miR-1000-5p'],
+    ['mir-1001', u'dme-miR-1001', u'dme-miR-1001-5p'],
+    ['mir-1002', u'dme-miR-1002', u'dme-miR-1002-5p'],
+    ['mir-1003', u'dme-miR-1003', u'dme-miR-1003-3p'],
+    ['mir-1004', u'dme-miR-1004', u'dme-miR-1004-3p'],
+    ['mir-1005', u'dme-miR-1005', u'dme-miR-1005-3p'],
+    ['mir-1006', u'dme-miR-1006', u'dme-miR-1006-3p'],
+    ['mir-1007', u'dme-miR-1007', u'dme-miR-1007-3p'],
+    ['mir-1008', u'dme-miR-1008', u'dme-miR-1008-3p'],
+    ['mir-1009', u'dme-miR-1009', u'dme-miR-1009-3p'],
+    ['mir-1010', u'dme-miR-1010', u'dme-miR-1010-3p'],
+    ['mir-1011', u'dme-miR-1011', u'dme-miR-1011-3p'],
+    ['mir-1012', u'dme-miR-1012', u'dme-miR-1012-3p'],
+    ['mir-1013', u'dme-miR-1013', u'dme-miR-1013-3p'],
+    ['mir-1014', u'dme-miR-1014', u'dme-miR-1014-3p'],
+    ['mir-1015', u'dme-miR-1015', u'dme-miR-1015-3p'],
+    ['mir-1016', u'dme-miR-1016', u'dme-miR-1016-3p'],
+    ['mir-1017', u'dme-miR-1017', u'dme-miR-1017-3p'],
+    ['mir-iab-4-3p', u'dme-miR-iab-4-3p', u'dme-miR-iab-4-3p'],
+    ['mir-iab-4-5p', u'dme-miR-iab-4-5p', u'dme-miR-iab-4-5p'],
+]
+
+# The updated mirbase id is in the third column.
+# the_147_mirs = [d[2] for d in original_147_updated_data if d[2] is not None]
+# print the_147_mirs
+# print len(the_147_mirs)
+# 144
+# the_147_mirs should really be the_144_mirs.
+the_147_mirs = [
+    u'dme-bantam-3p', u'dme-let-7-5p', u'dme-miR-1-3p', u'dme-miR-2a-3p',
+    u'dme-miR-2b-3p', u'dme-miR-2c-3p', u'dme-miR-3-3p', u'dme-miR-4-3p',
+    u'dme-miR-5-5p', u'dme-miR-6-3p', u'dme-miR-7-5p', u'dme-miR-8-3p',
+    u'dme-miR-9a-5p', u'dme-miR-9b-5p', u'dme-miR-9c-5p', u'dme-miR-10-5p',
+    u'dme-miR-11-3p', u'dme-miR-12-5p', u'dme-miR-13a-3p', u'dme-miR-13b-3p',
+    u'dme-miR-14-3p', u'dme-miR-31a-5p', u'dme-miR-31b-5p', u'dme-miR-33-5p',
+    u'dme-miR-34-5p', u'dme-miR-79-3p', u'dme-miR-87-3p', u'dme-miR-92a-3p',
+    u'dme-miR-92b-3p', u'dme-miR-100-5p', u'dme-miR-124-3p', u'dme-miR-125-5p',
+    u'dme-miR-133-3p', u'dme-miR-137-3p', u'dme-miR-184-3p', u'dme-miR-190-5p',
+    u'dme-miR-193-3p', u'dme-miR-210-3p', u'dme-miR-219-5p', u'dme-miR-252-5p',
+    u'dme-miR-263a-5p', u'dme-miR-263b-5p', u'dme-miR-274-5p',
+    u'dme-miR-275-3p', u'dme-miR-276a-3p', u'dme-miR-276b-3p',
+    u'dme-miR-277-3p', u'dme-miR-278-3p', u'dme-miR-279-3p', u'dme-miR-281-3p',
+    u'dme-miR-282-5p', u'dme-miR-283-5p', u'dme-miR-284-3p', u'dme-miR-285-3p',
+    u'dme-miR-286-3p', u'dme-miR-287-3p', u'dme-miR-288-3p', u'dme-miR-289-5p',
+    u'dme-miR-303-5p', u'dme-miR-304-5p', u'dme-miR-305-5p', u'dme-miR-306-5p',
+    u'dme-miR-307a-3p', u'dme-miR-308-3p', u'dme-miR-309-3p',
+    u'dme-miR-310-3p', u'dme-miR-311-3p', u'dme-miR-312-3p', u'dme-miR-313-3p',
+    u'dme-miR-314-3p', u'dme-miR-315-5p', u'dme-miR-316-5p', u'dme-miR-317-3p',
+    u'dme-miR-318-3p', u'dme-miR-375-3p', u'dme-miR-927-5p', u'dme-miR-929-3p',
+    u'dme-miR-932-5p', u'dme-miR-954-5p', u'dme-miR-955-5p', u'dme-miR-956-3p',
+    u'dme-miR-957-3p', u'dme-miR-958-3p', u'dme-miR-959-3p', u'dme-miR-960-5p',
+    u'dme-miR-961-5p', u'dme-miR-962-5p', u'dme-miR-963-5p', u'dme-miR-964-5p',
+    u'dme-miR-965-3p', u'dme-miR-966-5p', u'dme-miR-967-5p', u'dme-miR-968-5p',
+    u'dme-miR-969-5p', u'dme-miR-970-3p', u'dme-miR-971-3p', u'dme-miR-972-3p',
+    u'dme-miR-973-5p', u'dme-miR-974-5p', u'dme-miR-975-5p', u'dme-miR-976-3p',
+    u'dme-miR-977-3p', u'dme-miR-978-3p', u'dme-miR-979-3p', u'dme-miR-980-3p',
+    u'dme-miR-981-3p', u'dme-miR-982-5p', u'dme-miR-983-5p', u'dme-miR-984-5p',
+    u'dme-miR-985-3p', u'dme-miR-986-5p', u'dme-miR-987-5p', u'dme-miR-988-3p',
+    u'dme-miR-989-3p', u'dme-miR-990-5p', u'dme-miR-991-3p', u'dme-miR-992-3p',
+    u'dme-miR-993-3p', u'dme-miR-994-5p', u'dme-miR-995-3p', u'dme-miR-996-3p',
+    u'dme-miR-997-5p', u'dme-miR-998-3p', u'dme-miR-999-3p',
+    u'dme-miR-1000-5p', u'dme-miR-1001-5p', u'dme-miR-1002-5p',
+    u'dme-miR-1003-3p', u'dme-miR-1004-3p', u'dme-miR-1005-3p',
+    u'dme-miR-1006-3p', u'dme-miR-1007-3p', u'dme-miR-1008-3p',
+    u'dme-miR-1009-3p', u'dme-miR-1010-3p', u'dme-miR-1011-3p',
+    u'dme-miR-1012-3p', u'dme-miR-1013-3p', u'dme-miR-1014-3p',
+    u'dme-miR-1015-3p', u'dme-miR-1016-3p', u'dme-miR-1017-3p',
+    u'dme-miR-iab-4-3p', u'dme-miR-iab-4-5p']
 
 
 # Fake Named Graph URIs used to:
@@ -800,33 +1035,66 @@ def update_mirbase_ids(mirbase_ids):
     not be in the returned dict.  If the mirbase id maps to multiple mature
     mirbase accs (I do not *think* this happens), the returned dict will only
     map the original to one of the current mirbase ids for those mirbase accs.
-    Finally, if the original mirbase id could be the same as the current
+    Finally, the original mirbase id could be the same as the current
     mirbase id if it is up-to-date.
     '''
     # Generate URIs for the mirbase ids
-    mids = [mirbase_id_iri(mirbase_id) for mirbase_id in mirbase_ids]
-    # Query for a mapping from original id to current id
-    query = prefixes() + '''
-    SELECT DISTINCT ?dm_old ?dm
-    WHERE {
-    VALUES ?dm_old { ''' + ' '.join(['<{}>'.format(mid) for mid in mids]) + ''' }
-    # convert old mirbase ids to mirbase accs
-    ?dma mb:has_id ?dm_old .
-    # FILTER ?dm_old IN ( ''' + ', '.join('<{}>'.format(mid) for mid in mids) + ''' )
-    ?dm_old up:database db:mirbase_id .
-    # convert mirbase accs to current mirbase ids
-    ?dma up:database db:mirbase_acc .
-    ?dma a mb:mature_mirna .
-    ?dma mb:current_id ?dm .
-    }
+    # Empirical tests showed that the FULL Head HTTP error occurs for 25+
+    # mirbase ids, but not for 20 or fewer.  So run queries in groups of 20.
+
+    old2new = {}
+    all_mids = [mirbase_id_iri(mirbase_id) for mirbase_id in mirbase_ids]
+    for mids in util.groupsOfN(all_mids, 20):
+        # Query for a mapping from original id to current id
+        query = prefixes() + '''
+        SELECT DISTINCT ?dm_old ?dm
+        WHERE {
+        VALUES ?dm_old { ''' + ' '.join(['<{}>'.format(mid) for mid in mids]) + ''' }
+        # convert old mirbase ids to mirbase accs
+        ?dma mb:has_id ?dm_old .
+        # FILTER ?dm_old IN ( ''' + ', '.join('<{}>'.format(mid) for mid in mids) + ''' )
+        ?dm_old up:database db:mirbase_id .
+        # convert mirbase accs to current mirbase ids
+        ?dma up:database db:mirbase_acc .
+        ?dma a mb:mature_mirna .
+        ?dma mb:current_id ?dm .
+        }
+        '''
+        print 'query:', query
+        result = sparql_json_query(query)
+        # iris are like u'http://purl.targetscan.org/mir_family/miR-33'
+        # or u'http://purl.targetscan.org/mir_family/miR-279%2F286%2F996'
+        lookup = dict((os.path.basename(b['dm_old']['value']), 
+                    os.path.basename(b['dm']['value'])) for b in
+                    result['results']['bindings'])
+        old2new.update(lookup)
+    return old2new # map old id to new id
+
+
+def original_147_mirs_searchname(mir):
     '''
-    result = sparql_json_query(query)
-    # iris are like u'http://purl.targetscan.org/mir_family/miR-33'
-    # or u'http://purl.targetscan.org/mir_family/miR-279%2F286%2F996'
-    lookup = dict((os.path.basename(b['dm_old']['value']), 
-                   os.path.basename(b['dm']['value'])) for b in
-                  result['results']['bindings'])
-    return lookup # map old id to new id
+    Change strings like mir-3 into dme-miR-3 when searching for the most recent
+    version.
+    '''
+    if not mir.startswith('dme-'):
+        mir = u'dme-' + mir
+    if mir.find('-mir-') != -1:
+        mir = re.sub('-mir-', '-miR-', mir)
+    return mir
+
+
+def update_original_147_mirs():
+    orig2search = {mir: original_147_mirs_searchname(mir) for mir in original_147_mirs}
+    search_mirs = orig2search.values()
+    print 'The ids and search terms:'
+    for mir in original_147_mirs:
+        print mir, '===>', orig2search[mir]
+    print 'Updating mirbase ids'
+    search2latest = update_mirbase_ids(search_mirs) # [:20])  # 20 <=x 25 < 30 < 50 < 80
+    for mir in original_147_mirs:
+        search = orig2search[mir]
+        latest = search2latest.get(search)
+        print repr([mir, search, latest])
 
 
 def update_validated_mirs_to_current_mirbase_ids():
@@ -1965,7 +2233,7 @@ def write_ranked_validated_mir_targets_sub(filename, mirs, mir_targets,
                       percent_targets_in_others, percent_others_in_targets)
             fh.write(template.format(*fields))
 
-
+# Update groups of mirs to the most recent mature mirna id in the database.
 
 ###############
 # MAIN WORKFLOW
@@ -2039,6 +2307,7 @@ def workflow():
         write_conserved_synaptic_genes()
         write_affymetrix_to_flybase_table()
         write_human_to_fly_conserved_synapse_genes_table()
+        update_original_147_mirs() # A step in the manual process to update ids
 
         # PHASE I
         write_phase_1()
@@ -2062,31 +2331,6 @@ def workflow():
 
     else:
 
-
-        # PHASE ZERO
-        write_conserved_synaptic_genes()
-        write_affymetrix_to_flybase_table()
-        write_human_to_fly_conserved_synapse_genes_table()
-
-        # PHASE I
-        write_phase_1()
-        # write_targetscan_human_mirs_targeting_conserved_synapse_genes()
-        # write_microcosm_human_mirs_targeting_conserved_synapse_genes()
-        # write_overlap_between_microcosm_human_mirs_and_targetscan_human_mirs()
-        # write_targetscan_fly_mirs_targeting_conserved_synapse_genes()
-        # write_microcosm_fly_mirs_targeting_conserved_synapse_genes()
-        # write_overlap_between_validated_fly_mirs_and_microcosm_predicted_fly_mirs()
-        # write_overlap_between_validated_fly_mirs_and_targetscan_predicted_fly_mirs()
-        # write_overlap_between_microcosm_fly_mirs_and_targetscan_fly_mirs()
-
-        # PHASE II
-        write_overlap_between_screened_and_microcosm_and_targetscan_fly_mir_targets()
-        write_overlap_of_screened_fly_mir_targets_and_nmj_rnai_genes()
-        write_overlap_of_validated_fly_mir_targets_and_nmj_rnai_genes()
-        write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_homologs()
-
-        # PHASE III
-        write_ranked_validated_mir_targets()
 
         pass
 
