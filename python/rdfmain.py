@@ -180,7 +180,6 @@ original_147_mirs = [
 # like it should have been searched for under dme-miR-276a and dme-miR-276b.
 # However, since both of those mirs were independently searched for, no loss of
 # information occurred by excluding mir-276.
-
 # There 144 out of 147 that were mapped to a current mirbase id.
 original_147_updated_data = [
     ['bantam', u'dme-bantam', u'dme-bantam-3p'],
@@ -2180,6 +2179,86 @@ def write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_ho
 # Rank the 27 functionally validated miRs by percentage of predicted targets that are also in the NMJ RNAi genes.
 # Rank the 27 functionally validated miRs by percentage of predicted targets that are also conserved synaptic genes.
 
+def write_ranked_147_mir_targets():
+    print 'write_ranked_147_mir_targets'
+    # write_ranked_mir_targets(the_147_mirs[:2], '147', print_validated=True)
+    write_ranked_mir_targets(the_147_mirs, '147', print_validated=True)
+
+def write_ranked_validated_mir_targets():
+    print 'write_ranked_validated_mir_targets'
+    # # If you want to shorten validated_mirs for testing
+    # global validated_mirs
+    # validated_mirs = validated_mirs[:2]
+    write_ranked_mir_targets(validated_mirs, 'validated')
+
+
+def write_ranked_mir_targets(mirs, mirs_name, print_validated=False):
+    '''
+    mirs: a list of current mirbase ids
+    mirs_name: a string used to construct file names and table column names.
+    print_validated: If True, print a column saying whether or not each miR
+    is part of the validated set of mirs.
+    '''
+    print 'write_ranked_mir_targets'
+    dn = makedirs(os.path.join(results_dir(), 'phase3',
+                               'ranked_{name}_mirs'.format(name=mirs_name)))
+    fnt = 'ranked_{name}_mirs_using_{targets}_and_{background}.csv'
+    rnai = set(get_nmj_rnai_genes())
+    conserved = set(fly_conserved_synapse_genes())
+    other_pairs = [(rnai, 'nmj_rnai_genes'), 
+                   (conserved, 'conserved_synapse_genes')]
+    params = itertools.product(targets_dbs, 
+                               [(rnai, 'nmj_rnai_genes'), 
+                      (conserved, 'conserved_synapse_genes')])
+    for other_genes, other_name in other_pairs:
+        # merged
+        mir_targets = {mir: merged_fly_targets(mir) for mir in mirs}
+        fn = os.path.join(dn, fnt.format(name=mirs_name, targets='merged', background=other_name))
+        print 'writing', fn
+        write_ranked_mir_targets_sub(fn, mirs, mirs_name, mir_targets,
+                                     other_genes, other_name,
+                                     print_validated=print_validated)
+        # targetscan and microcosm
+        for targets_db in targets_dbs:
+            mir_targets = {mir: short_fly_targets(mir, targets_db) for mir in
+                        mirs}
+            fn = os.path.join(dn, fnt.format(name=mirs_name, targets=targets_db, background=other_name))
+            print 'writing', fn
+            write_ranked_mir_targets_sub(fn, mirs, mirs_name, mir_targets,
+                                         other_genes, other_name,
+                                         print_validated=print_validated)
+
+
+def write_ranked_mir_targets_sub(filename, mirs, mirs_name, mir_targets,
+                                           other_genes, other_name, print_validated=True):
+    headers = ['{name}_group_mir'.format(name=mirs_name)]
+    if print_validated:
+        headers += ['validated']
+    headers += ['num_target_genes', 'num_{other}_genes', 'num_in_intersection',
+                'percent_target_genes_in_{other}_genes',
+                'percent_{other}_genes_in_target_genes']
+    template = ','.join('{}' for h in headers) + '\n'
+    others = set(other_genes)
+    num_others = len(others)
+    with open(filename, 'w') as fh:
+        fh.write(template.format(*headers).format(other=other_name))
+        for mir in mirs:
+            targets = set(mir_targets[mir])
+            num_targets = len(targets)
+            num_intersection = len(targets & others)
+            if num_targets > 0:
+                percent_targets_in_others = num_intersection / float(num_targets)
+            else:
+                percent_targets_in_others = 'NaN'
+            percent_others_in_targets = num_intersection / float(num_others)
+            fields = [mir]
+            if print_validated:
+                fields += [mir in validated_mirs]
+            fields += [num_targets, num_others,num_intersection,
+                       percent_targets_in_others, percent_others_in_targets]
+            fh.write(template.format(*fields))
+
+
 def write_ranked_validated_mir_targets():
     print 'write_ranked_validated_mir_targets'
     # global validated_mirs
@@ -2248,6 +2327,7 @@ def workflow():
     if False: # Done tasks
         pass
 
+        # Download initial data files
         download_microcosm_targets()
         download_mirbase_aliases()
         download_targetscan()
@@ -2261,6 +2341,7 @@ def workflow():
         # download_synaptome_v1()
         # download_flybase_transcript_reporting_xml()
 
+        # Convert databases to RDF
         write_affymetrix_fly_annotations_rdf()
         write_flybase_rdf()
         write_ibanez_five_prime_mir_homologs_rdf()
@@ -2307,6 +2388,12 @@ def workflow():
         write_conserved_synaptic_genes()
         write_affymetrix_to_flybase_table()
         write_human_to_fly_conserved_synapse_genes_table()
+
+        # This step requires that the mirbase data be loaded, so ids can be updated.
+        # The step is part of a manual process that resulted in the_147_mirs being
+        # assigned a literal array.  To fully automate, one could save the
+        # array to a file when creating it and then read it from the file when
+        # using it.
         update_original_147_mirs() # A step in the manual process to update ids
 
         # PHASE I
@@ -2331,7 +2418,18 @@ def workflow():
 
     else:
 
+        # load_rdf_database()
+        # load_constructed_edges()
+        # write_ranked_validated_mir_targets()
+        write_ranked_147_mir_targets()
 
+        vs = set(validated_mirs)
+        t147s = set(the_147_mirs)
+        print 'Validated mirs should all be in the 147 mirs, I think:'
+        print 'Number of validated mirs not in the 147 mirs:', len(vs - t147s)
+        print 'Number of 147 mirs in validated mirs:', len(t147s & vs)
+        print 'Size of the 147 mirs set:', len(t147s)
+        print 'Size of the validated mirs set:', len(vs)
         pass
 
 
