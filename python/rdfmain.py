@@ -2202,14 +2202,14 @@ def write_ranked_mir_targets(mirs, mirs_name, print_validated=False):
     print 'write_ranked_mir_targets'
     dn = makedirs(os.path.join(results_dir(), 'phase3',
                                'ranked_{name}_mirs'.format(name=mirs_name)))
-    fnt = 'ranked_{name}_mirs_using_{targets}_and_{background}.csv'
+    fnt = 'ranked_{name}_mirs_using_{targets}_and_{background}_genes.csv'
     rnai = set(get_nmj_rnai_genes())
     conserved = set(fly_conserved_synapse_genes())
-    other_pairs = [(rnai, 'nmj_rnai_genes'), 
-                   (conserved, 'conserved_synapse_genes')]
+    other_pairs = [(rnai, 'nmj_rnai'), 
+                   (conserved, 'conserved_synapse')]
     params = itertools.product(targets_dbs, 
-                               [(rnai, 'nmj_rnai_genes'), 
-                      (conserved, 'conserved_synapse_genes')])
+                               [(rnai, 'nmj_rnai'), 
+                      (conserved, 'conserved_synapse')])
     for other_genes, other_name in other_pairs:
         # merged
         mir_targets = {mir: merged_fly_targets(mir) for mir in mirs}
