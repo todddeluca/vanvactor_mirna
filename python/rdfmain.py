@@ -28,6 +28,7 @@ import functools
 
 import rdflib
 import requests.exceptions
+import scipy.stats
 
 import util
 import config
@@ -1354,6 +1355,44 @@ def short_human_to_fly_conserved_synapse_genes_table():
     return query_for_id_tuples(query, ['heg', 'fbg'])
 
 
+def short_human_to_fly_conserved_genes_table():
+    '''
+    Return a list of tuples of human ensembl gene and flybase gene that are
+    orthologous to each other.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?heg ?fbg
+    WHERE {
+    # conserved genes
+    ?heg up:organism taxon:9606 .
+    ?heg up:database db:ensembl_gene .
+    ?heg obo:orthologous_to ?fbg .
+    ?fbg up:organism taxon:7227 .
+    ?fbg up:database db:flybase_gene .
+    }
+    '''
+    return query_for_id_tuples(query, ['heg', 'fbg'])
+
+
+def fly_conserved_genes():
+    human, fly = zip(*short_human_to_fly_conserved_genes_table())
+    return list(set(fly))
+
+
+def fly_genes():
+    '''
+    return a list of flybase genes.
+    '''
+    query = prefixes() + '''
+    SELECT DISTINCT ?fbg
+    WHERE {
+    # drosophila melanogaster flybase genes
+    ?fbg up:organism taxon:7227 .
+    ?fbg up:database db:flybase_gene .
+    }
+    '''
+    return query_for_ids(query, 'fbg')
+
 
 def human_to_fly_conserved_synapse_genes_table():
     '''
@@ -2178,11 +2217,52 @@ def write_overlap_of_validated_mir_targets_and_conserved_targets_of_human_mir_ho
 # PHASE III
 # Rank the 27 functionally validated miRs by percentage of predicted targets that are also in the NMJ RNAi genes.
 # Rank the 27 functionally validated miRs by percentage of predicted targets that are also conserved synaptic genes.
+# Also rank them by hypergeometric distribution.  
+#   - sets: predicted targets, conserved synaptic genes, background: all conserved genes (or all flybase genes?)
+#   - sets: predicted targets, NMJ RNAi genes. background: all flybase genes
+#   - examine the sizes of the sets and the overlaps, so we can confirm that the statistics look reasonable.
+
+def hypergeometric_pvalue(background_genes, target_genes, goal_genes):
+    '''
+    Compute the p-value that the sample target_genes, sampled from
+    background_genes, contains as many objects from goal_genes as it does, when
+    sampling at random.
+    background_genes must contain every gene in target_genes and goal_genes.
+    '''
+    # The cdf function returns the probability that X <= x
+    # The p-value is the probability of X >= x.
+    # Since the hypergeometric distribution is discrete, P(X >= x) = 1 - P(X <= (x-1)).
+    assert not target_genes - background_genes
+    if goal_genes - background_genes:
+        print 'len(background_genes)'
+        print len(background_genes)
+        print 'goal_genes'
+        print goal_genes
+        print 'goal_genes - background_genes'
+        print goal_genes - background_genes
+        print 'len(goal_genes)'
+        print len(goal_genes)
+        print 'len(goal_genes - background_genes)'
+        print len(goal_genes - background_genes)
+    assert not goal_genes - background_genes
+
+    # total number of balls
+    M = len(background_genes)
+    # number of black balls
+    n = len(goal_genes)
+    # number of balls sampled
+    N = len(target_genes)
+    # number of black balls in sample
+    x = len(target_genes & goal_genes)
+    pvalue = 1.0 - scipy.stats.hypergeom.cdf(x - 1, M, n, N, loc=0)
+    return pvalue
+
 
 def write_ranked_147_mir_targets():
     print 'write_ranked_147_mir_targets'
     # write_ranked_mir_targets(the_147_mirs[:2], '147', print_validated=True)
     write_ranked_mir_targets(the_147_mirs, '147', print_validated=True)
+
 
 def write_ranked_validated_mir_targets():
     print 'write_ranked_validated_mir_targets'
@@ -2202,60 +2282,90 @@ def write_ranked_mir_targets(mirs, mirs_name, print_validated=False):
     print 'write_ranked_mir_targets'
     dn = makedirs(os.path.join(results_dir(), 'phase3',
                                'ranked_{name}_mirs'.format(name=mirs_name)))
-    fnt = 'ranked_{name}_mirs_using_{targets}_and_{background}_genes.csv'
-    rnai = set(get_nmj_rnai_genes())
-    conserved = set(fly_conserved_synapse_genes())
+    fnt = 'ranked_{name}_mirs_using_{targets}_and_{goal}_genes.csv'
+
+    # background gene sets:  Used as the background for hypergeometric test
+    conserved_genes = set(fly_conserved_genes())
+    all_genes = set(fly_genes()) # all flybase Drosophila melanogaster genes in the datastore.
+
+    # goal gene sets:  The more of these in the targets, the higher the ranking
+    # Note: a few NMJ RNAi FBgn ids are not in 'all_genes', perhaps because
+    # they come from different versions of the flybase database.
+    # Specifically 10 of the 468 RNAi genes are not in `all_genes`
+    rnai = set(get_nmj_rnai_genes()) & all_genes
+    conserved_synapse = set(fly_conserved_synapse_genes())
+
     other_pairs = [(rnai, 'nmj_rnai'), 
-                   (conserved, 'conserved_synapse')]
-    params = itertools.product(targets_dbs, 
-                               [(rnai, 'nmj_rnai'), 
-                      (conserved, 'conserved_synapse')])
+                   (conserved_synapse, 'conserved_synapse')]
+    params = itertools.product(targets_dbs, other_pairs)
     for other_genes, other_name in other_pairs:
         # merged
         mir_targets = {mir: merged_fly_targets(mir) for mir in mirs}
-        fn = os.path.join(dn, fnt.format(name=mirs_name, targets='merged', background=other_name))
+        fn = os.path.join(dn, fnt.format(name=mirs_name, targets='merged', goal=other_name))
         print 'writing', fn
         write_ranked_mir_targets_sub(fn, mirs, mirs_name, mir_targets,
+                                     conserved_genes, all_genes,
                                      other_genes, other_name,
                                      print_validated=print_validated)
         # targetscan and microcosm
         for targets_db in targets_dbs:
-            mir_targets = {mir: short_fly_targets(mir, targets_db) for mir in
-                        mirs}
-            fn = os.path.join(dn, fnt.format(name=mirs_name, targets=targets_db, background=other_name))
+            mir_targets = {mir: short_fly_targets(mir, targets_db) for mir in mirs}
+            fn = os.path.join(dn, fnt.format(name=mirs_name, targets=targets_db, goal=other_name))
             print 'writing', fn
             write_ranked_mir_targets_sub(fn, mirs, mirs_name, mir_targets,
+                                         conserved_genes, all_genes,
                                          other_genes, other_name,
                                          print_validated=print_validated)
 
 
 def write_ranked_mir_targets_sub(filename, mirs, mirs_name, mir_targets,
-                                           other_genes, other_name, print_validated=True):
+                                 conserved_genes, all_genes,
+                                 other_genes, other_name,
+                                 print_validated=True):
     headers = ['{name}_group_mir'.format(name=mirs_name)]
     if print_validated:
         headers += ['validated']
     headers += ['num_target_genes', 'num_{other}_genes', 'num_in_intersection',
                 'percent_target_genes_in_{other}_genes',
-                'percent_{other}_genes_in_target_genes']
+                'percent_{other}_genes_in_target_genes',
+                'num_conserved_target_genes', 'num_conserved_{other}_genes',
+                'num_in_conserved_intersection', 'all_hypergeometric_pvalue',
+                'conserved_hypergeometric_pvalue',
+                'num_all_genes', 'num_conserved_genes']
     template = ','.join('{}' for h in headers) + '\n'
     others = set(other_genes)
     num_others = len(others)
+    conserved_others = others & conserved_genes
+    num_conserved_others = len(conserved_others)
     with open(filename, 'w') as fh:
         fh.write(template.format(*headers).format(other=other_name))
         for mir in mirs:
             targets = set(mir_targets[mir])
             num_targets = len(targets)
+            conserved_targets = targets & conserved_genes
+            num_conserved_targets = len(conserved_targets)
             num_intersection = len(targets & others)
+            num_conserved_intersection = len(conserved_targets & conserved_others)
             if num_targets > 0:
                 percent_targets_in_others = num_intersection / float(num_targets)
             else:
                 percent_targets_in_others = 'NaN'
             percent_others_in_targets = num_intersection / float(num_others)
+            all_genes_hypergeom = hypergeometric_pvalue(
+                background_genes=all_genes, target_genes=targets,
+                goal_genes=others)
+            conserved_genes_hypergeom = hypergeometric_pvalue(
+                background_genes=conserved_genes, target_genes=conserved_targets,
+                goal_genes=conserved_others)
             fields = [mir]
             if print_validated:
                 fields += [mir in validated_mirs]
             fields += [num_targets, num_others,num_intersection,
-                       percent_targets_in_others, percent_others_in_targets]
+                       percent_targets_in_others, percent_others_in_targets,
+                       num_conserved_targets, num_conserved_others,
+                       num_conserved_intersection, all_genes_hypergeom,
+                       conserved_genes_hypergeom,
+                       len(all_genes), len(conserved_genes)]
             fh.write(template.format(*fields))
 
 
@@ -2415,13 +2525,24 @@ def workflow():
 
         # PHASE III
         write_ranked_validated_mir_targets()
+        write_ranked_147_mir_targets()
 
     else:
-
+        # start_stardog()
         # load_rdf_database()
         # load_constructed_edges()
+
         # write_ranked_validated_mir_targets()
-        write_ranked_147_mir_targets()
+        # write_ranked_147_mir_targets()
+
+        # debug_pairs(short_human_to_fly_conserved_genes_table(), 'conserved genes')
+        # debug_pairs(human_to_fly_conserved_synapse_genes_table(), 'conserved synapse genes')
+        # debug_pairs(short_human_to_fly_conserved_synapse_genes_table(), 'short conserved synapse genes')
+
+        # fg = fly_genes()
+        # print len(fg)
+        # print len(set(fg))
+        # print len(fly_conserved_genes())
 
         vs = set(validated_mirs)
         t147s = set(the_147_mirs)
@@ -2432,6 +2553,22 @@ def workflow():
         print 'Size of the validated mirs set:', len(vs)
         pass
 
+
+def debug_pairs(tbl, desc=None):
+    '''
+    Some functions return a list of pairs of human and fly genes.  This
+    prints out how many pairs there are, how many unique pairs, and
+    how many unique human and fly genes.
+    '''
+    print desc
+    # print tbl
+    print 'all pairs', len(tbl)
+    print 'unique pairs', len(set(tbl))
+    h, f = zip(*tbl)
+    h = set(h)
+    f = set(f)
+    print 'unique human ids', len(h)
+    print 'unique fly ids', len(f)
 
 
 def main():

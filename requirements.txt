@@ -1,4 +1,7 @@
 temps
 rdflib
 requests
+numpy
+scipy
+
 
