@@ -14,17 +14,18 @@ methods.
 '''
 
 import cStringIO
+import collections
 import csv
+import datetime
+import functools
 import itertools
 import json
 import logging
 import os
 import re
 import subprocess
-import urllib
 import sys
-import datetime
-import functools
+import urllib
 
 import rdflib
 import requests.exceptions
@@ -57,7 +58,7 @@ from mirna.uniprot import (uniprot_fly_rdf_path,
                            download_uniprot_homo_refseq_rdf,
                            set_uniprot_version)
 from mirna.microcosm import (download_microcosm_targets, microcosm_rdf_path,
-                             write_microcosm_rdf)
+                             write_microcosm_rdf, microcosm_fly_mirs)
 from mirna.mcneill import (write_mcneill_cns_screen_rdf,
                            write_mcneill_muscle_screen_rdf,
                            mcneill_cns_screen_rdf_path,
@@ -77,7 +78,8 @@ from mirna.roundup import (download_roundup_from_sparql, roundup_rdf_path,
                            roundup_sparql_rdf_path,
                            write_roundup_orthologs_rdf)
 from mirna.synaptomedb import (synaptomedb_v1_rdf_path, write_synaptomedb_rdf)
-from mirna.nmjrnai import get_nmj_rnai_genes
+from mirna.nmjrnai import (get_nmj_rnai_genes,
+                           get_nmj_rnai_gain_of_function_genes)
 
 
 
@@ -840,7 +842,8 @@ def construct_microcosm_fly_mirna_id_to_gene_edges():
     '''
     Construct edges from current mirbase id to flybase gene
     by going from current mirbase id to mirbase accession to
-    mirbase id to flybase annotation id to
+    mirbase id to flybase annotation id to flybase transcript
+    to uniprot to flybase gene
     '''
     query = prefixes() + '''
     CONSTRUCT { ?cmid mb:targets ?fbg . }
@@ -1763,6 +1766,47 @@ def short_conserved_fly_targets(mirbase_id, targets_db):
     return query_for_ids(query, 'fbg')
 
 
+def microcosm_fly_targets_table():
+    '''
+    Return a list of tuples, where each tuple contains an original mirbase id
+    from microcosm, the current mirbase id, and a flybase gene targeted by
+    the mirbase id.
+    '''
+    # original_mirs = microcosm_fly_mirs()
+    # to_current_mir = update_mirbase_ids(original_mirs)
+    # # to_original_mir = dict(value, key for to_current_mir.values())
+
+    # table = []
+    # for mir in original_mirs[:5]:
+        # current_mir = to_current_mir.get(mir)
+        # targets = sorted(short_fly_targets(mir, MICROCOSM))
+        # if not targets:
+            # table.append((mir, current_mir, None))
+        # else:
+            # for target in targets:
+                # table.append((mir, current_mir, target))
+
+    # return table
+
+    query = prefixes() + '''
+    SELECT DISTINCT ?dmid ?fbg
+    WHERE {
+    # flybase genes targeted by mirs in microcosm
+    GRAPH <''' + TARGETS_DB_TO_NG[MICROCOSM] + '''> {
+        ?dmid mb:targets ?fbg .
+        }
+    ?dmid up:database db:mirbase_id .
+    ?dmid up:organism taxon:7227 .
+    ?fbg up:database db:flybase_gene .
+    ?fbg up:organism taxon:7227 .
+    }
+    '''
+    table = query_for_id_tuples(query, ['dmid', 'fbg'])
+    return sorted(set(table))
+
+
+
+
 def short_fly_targets(mirbase_id, targets_db):
     '''
     Return the flybase genes targeted by `mirbase_id` in the predicted targets
@@ -2288,34 +2332,65 @@ def write_ranked_mir_targets(mirs, mirs_name, print_validated=False):
     conserved_genes = set(fly_conserved_genes())
     all_genes = set(fly_genes()) # all flybase Drosophila melanogaster genes in the datastore.
 
-    # goal gene sets:  The more of these in the targets, the higher the ranking
+    # "other" gene sets, for lack of a better word.  The more of these genes in
+    # the targets, the higher the ranking of the miR.
     # Note: a few NMJ RNAi FBgn ids are not in 'all_genes', perhaps because
     # they come from different versions of the flybase database.
     # Specifically 10 of the 468 RNAi genes are not in `all_genes`
-    rnai = set(get_nmj_rnai_genes()) & all_genes
+    # Also 23 of the 201 RNAi gain of function genes are not in all_genes.
+    # Most of these are from non-Dmel species, some were created after we
+    # downloaded our data (UniProt 2013_04), and the remaining ones are 
+    # inexplicably missing.
+    rnai = set(get_nmj_rnai_genes())
+    print 'rnai genes not in all genes:'
+    print rnai - all_genes
+    print len(rnai - all_genes)
+    rnai = rnai & all_genes
+
+    rnai_gof = set(get_nmj_rnai_gain_of_function_genes())
+    print 'len(rnai_gof):', len(rnai_gof)
+    print 'rnai gof genes not in all genes:'
+    print rnai_gof - all_genes
+    print len(rnai_gof - all_genes)
+    rnai_gof = rnai_gof & all_genes
+
     conserved_synapse = set(fly_conserved_synapse_genes())
 
     other_pairs = [(rnai, 'nmj_rnai'), 
-                   (conserved_synapse, 'conserved_synapse')]
+                   (conserved_synapse, 'conserved_synapse'),
+                   (rnai_gof, 'nmj_rnai_gof')]
     params = itertools.product(targets_dbs, other_pairs)
     for other_genes, other_name in other_pairs:
-        # merged
-        mir_targets = {mir: merged_fly_targets(mir) for mir in mirs}
-        fn = os.path.join(dn, fnt.format(name=mirs_name, targets='merged', goal=other_name))
-        print 'writing', fn
-        write_ranked_mir_targets_sub(fn, mirs, mirs_name, mir_targets,
-                                     conserved_genes, all_genes,
-                                     other_genes, other_name,
-                                     print_validated=print_validated)
-        # targetscan and microcosm
-        for targets_db in targets_dbs:
-            mir_targets = {mir: short_fly_targets(mir, targets_db) for mir in mirs}
-            fn = os.path.join(dn, fnt.format(name=mirs_name, targets=targets_db, goal=other_name))
+        # lookup tables of genes targeted by each mir for each method (microcosm, targetscan, both)
+        microcosm_targets = {mir: set(short_fly_targets(mir, MICROCOSM)) for mir in mirs}
+        targetscan_targets = {mir: set(short_fly_targets(mir, TARGETSCAN)) for mir in mirs}
+        merged_targets = {mir: microcosm_targets[mir] | targetscan_targets[mir] for mir in mirs}
+        for mir_targets, targets_name in ((microcosm_targets, MICROCOSM),
+                                          (targetscan_targets, TARGETSCAN),
+                                          (merged_targets, 'merged')):
+            fn = os.path.join(dn, fnt.format(name=mirs_name, targets=targets_name, goal=other_name))
             print 'writing', fn
             write_ranked_mir_targets_sub(fn, mirs, mirs_name, mir_targets,
                                          conserved_genes, all_genes,
                                          other_genes, other_name,
                                          print_validated=print_validated)
+
+
+def test_merged_targets_equals_microcosm_union_targetscan():
+    '''
+    The merged targets should equal the union of the microcosm targets and
+    targetscan targets for a mir.  Test that this is true using the 147
+    mirs.
+    An exception is raised if it is not true for a mir.
+    '''
+    for mir in the_147_mirs:
+        print 'testing', mir
+        merged = merged_fly_targets(mir)
+        microcosm = short_fly_targets(mir, MICROCOSM)
+        targetscan = short_fly_targets(mir, TARGETSCAN)
+        if set(merged) != set(microcosm) | set(targetscan):
+            print 'merged != microcosm + targetscan'
+            raise Exception()
 
 
 def write_ranked_mir_targets_sub(filename, mirs, mirs_name, mir_targets,
@@ -2369,60 +2444,19 @@ def write_ranked_mir_targets_sub(filename, mirs, mirs_name, mir_targets,
             fh.write(template.format(*fields))
 
 
-def write_ranked_validated_mir_targets():
-    print 'write_ranked_validated_mir_targets'
-    # global validated_mirs
-    # validated_mirs = validated_mirs[:2]
-    dn = makedirs(os.path.join(results_dir(), 'phase3', 'ranked_validated_mirs'))
-    fnt = 'ranked_validated_mirs_using_{}_and_{}.csv'
-    rnai = set(get_nmj_rnai_genes())
-    conserved = set(fly_conserved_synapse_genes())
-    other_pairs = [(rnai, 'nmj_rnai_genes'), 
-                   (conserved, 'conserved_synapse_genes')]
-    params = itertools.product(targets_dbs, 
-                               [(rnai, 'nmj_rnai_genes'), 
-                      (conserved, 'conserved_synapse_genes')])
-    for other_genes, other_name in other_pairs:
-        # merged
-        mir_targets = {mir: merged_fly_targets(mir) for mir in validated_mirs}
-        fn = os.path.join(dn, fnt.format('merged', other_name))
-        print 'writing', fn
-        write_ranked_validated_mir_targets_sub(
-            fn, validated_mirs, mir_targets, other_genes, other_name)
-        # targetscan and microcosm
-        for targets_db in targets_dbs:
-            mir_targets = {mir: short_fly_targets(mir, targets_db) for mir in
-                        validated_mirs}
-            fn = os.path.join(dn, fnt.format(targets_db, other_name))
-            print 'writing', fn
-            write_ranked_validated_mir_targets_sub(
-                fn, validated_mirs, mir_targets, other_genes, other_name)
+# RANDOM AND ONE-OFF TASKS
 
+def write_microcosm_mir_to_gene_table():
+    fn = os.path.join(results_dir(), 'microcosm_mirbase_id_to_flybase_gene_id.csv')
+    headers = ['mirbase_id', 'flybase_gene_id']
+    table = microcosm_fly_targets_table()
+    write_csv_file(rows=table, filename=fn, headers=headers)
+    # for mirbase_id, flybase_gene in table:
+        # print mirbase_id, flybase_gene
+    # # for mir, current_mir, gene in table:
+        # # print mir, current_mir, gene
+    # print len(table)
 
-def write_ranked_validated_mir_targets_sub(filename, mirs, mir_targets,
-                                           other_genes, other_name):
-    headers = ['validated_mir', 'num_target_genes', 'num_{other}_genes',
-               'num_in_intersection', 'percent_target_genes_in_{other}_genes',
-               'percent_{other}_genes_in_target_genes']
-    template = ','.join('{}' for h in headers) + '\n'
-    others = set(other_genes)
-    num_others = len(others)
-    with open(filename, 'w') as fh:
-        fh.write(template.format(*headers).format(other=other_name))
-        for mir in mirs:
-            targets = set(mir_targets[mir])
-            num_targets = len(targets)
-            num_intersection = len(targets & others)
-            if num_targets > 0:
-                percent_targets_in_others = num_intersection / float(num_targets)
-            else:
-                percent_targets_in_others = 'NaN'
-            percent_others_in_targets = num_intersection / float(num_others)
-            fields = (mir, num_targets, num_others,num_intersection,
-                      percent_targets_in_others, percent_others_in_targets)
-            fh.write(template.format(*fields))
-
-# Update groups of mirs to the most recent mature mirna id in the database.
 
 ###############
 # MAIN WORKFLOW
@@ -2534,6 +2568,7 @@ def workflow():
 
         # write_ranked_validated_mir_targets()
         # write_ranked_147_mir_targets()
+        write_microcosm_mir_to_gene_table()
 
         # debug_pairs(short_human_to_fly_conserved_genes_table(), 'conserved genes')
         # debug_pairs(human_to_fly_conserved_synapse_genes_table(), 'conserved synapse genes')
@@ -2543,6 +2578,8 @@ def workflow():
         # print len(fg)
         # print len(set(fg))
         # print len(fly_conserved_genes())
+
+        # test_merged_targets_equals_microcosm_union_targetscan()
 
         vs = set(validated_mirs)
         t147s = set(the_147_mirs)

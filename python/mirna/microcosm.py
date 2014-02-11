@@ -14,9 +14,9 @@ from mirna.util import call
 
 # Species
 # Homo sapiens
-HUMAN = '9606'
+HUMAN = 'homo_sapiens'
 # Drosophila melanogaster
-FLY = '7227'
+FLY = 'drosophila_melanogaster'
 
 
 ###########
@@ -129,6 +129,16 @@ def gen_microcosm_human_predicted_targets():
         mirbase_id = target['mir']
         ensembl_transcript_id = target['transcript_id']
         yield mirbase_id, ensembl_transcript_id
+
+
+def microcosm_fly_mirs():
+    '''
+    Return a sorted list of unique fly mirbase ids in the microcosm predicted
+    targets data.
+    '''
+    return sorted(set(mirbase_id for mirbase_id, target in
+                      gen_microcosm_fly_predicted_targets()))
+
 
 
 def gen_microcosm_targets(species, version='v5'):
