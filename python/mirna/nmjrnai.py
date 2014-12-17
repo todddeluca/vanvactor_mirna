@@ -17,7 +17,7 @@ def nmj_rnai_gain_of_function_set_path():
 
 def get_nmj_rnai_genes():
     '''
-    Return a list of flybase gene.
+    Return a list of flybase gene ids.
 
     The hits from three different screens (Aaron D'Antonio, Sanyal and
     Featherstone).  This contains FBgn IDs, which can be converted to gene
@@ -33,11 +33,15 @@ def get_nmj_rnai_genes():
 
 def get_nmj_rnai_gain_of_function_genes():
     '''
-    Return a list of flybase gene.
+    Return a list of flybase gene ids.
+
+    The gain of function genes should be a curated subset of the NMJ RNAi
+    genes.  They were defined in a file Elizabeth McNeill sent, 
+    "NMJ RNAi Gainoffunctionscreens.xlsx".
 
     The hits from three different screens (Aaron D'Antonio, Sanyal and
     Featherstone).  This contains FBgn IDs, which can be converted to gene
-    symbols using flybase ID converter 
+    symbols using flybase ID converter.
     '''
     path = nmj_rnai_gain_of_function_set_path()
     print path
