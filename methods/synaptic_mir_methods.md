@@ -24,7 +24,7 @@ Predicted targets were downloaded from the TargetScan database for human (versio
 - http://www.targetscan.org/fly_12/fly_12_data_download/Conserved_Family_Conserved_Targets_Info.txt.zip
 - http://www.targetscan.org/fly_12/fly_12_data_download/miR_Family_Info.txt.zip
 
-In human, data was downloaded to map from mir "families" to NCBI RefSeq Ids and from mir "family" to miRBase Accession.  In fly, data was downloaded to map from mir "families" to the fly geen symbols they are predicted to target, from mir "family" to miRBase Accession, and from fly gene symbol to flybase gene id.
+In human, data was downloaded to map from mir "families" to NCBI RefSeq Ids and from mir "family" to miRBase Accession.  In fly, data was downloaded to map from mir "families" to the fly gene symbols they are predicted to target, from mir "family" to miRBase Accession, and from fly gene symbol to flybase gene id.
 
 ### miRBase
 
@@ -119,12 +119,12 @@ For each of the 26 functionally validated miRs from McNeill, compare the predict
 
 The hypergeometric test p-value was calculated using the cumulative density function of the hypergeometric distribution from the `stats` module of SciPy, an open source library of scientific tools written in Python.
 
-# Rank the 27 functionally validated miRs by percentage of predicted targets that are also in the NMJ RNAi genes.
-# Rank the 27 functionally validated miRs by percentage of predicted targets that are also conserved synaptic genes.
-# Also rank them by hypergeometric distribution.  
-#   - sets: predicted targets, conserved synaptic genes, background: all conserved genes (or all flybase genes?)
-#   - sets: predicted targets, NMJ RNAi genes. background: all flybase genes
-#   - examine the sizes of the sets and the overlaps, so we can confirm that the statistics look reasonable.
+### Rank the 27 functionally validated miRs by percentage of predicted targets that are also in the NMJ RNAi genes.
+### Rank the 27 functionally validated miRs by percentage of predicted targets that are also conserved synaptic genes.
+### Also rank them by hypergeometric distribution.  
+- sets: predicted targets, conserved synaptic genes, background: all conserved genes (or all flybase genes?)
+- sets: predicted targets, NMJ RNAi genes. background: all flybase genes
+- examine the sizes of the sets and the overlaps, so we can confirm that the statistics look reasonable.
 
 
 How were relationships between miRs and genes established in fly and in human?
