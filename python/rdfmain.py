@@ -2765,7 +2765,7 @@ def workflow():
         # write_ranked_validated_mir_targets()
         # write_ranked_147_mir_targets()
         # write_microcosm_mir_to_gene_table()
-        write_may_grant_mir_targets_tables()
+        # write_may_grant_mir_targets_tables()
 
         # debug_pairs(short_human_to_fly_conserved_genes_table(), 'conserved genes')
         # debug_pairs(human_to_fly_conserved_synapse_genes_table(), 'conserved synapse genes')
