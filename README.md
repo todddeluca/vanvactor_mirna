@@ -7,3 +7,6 @@ This project is a bioinformatics collaboration between the Van Vactor Lab at Har
 ## Citation
 
 Please refer to the DOI provided by https://zenodo.org/.
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.3332837.svg)](https://doi.org/10.5281/zenodo.3332837)
+
